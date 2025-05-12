@@ -1,6 +1,8 @@
 import gc
 import json
+import functools
 from typing import List, Optional
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -21,13 +23,28 @@ class ShortGPT(BaseBlockwiseSparsification):
         super().__init__(model, sparsity_config, input, padding_mask, config)
         self.importances = np.zeros(len(self.blocks))
 
-    def block_opt(self, block):
+    def block_opt_origin(self, block):
         block = block.cuda()
 
         output_feat = self.block_forward(block)
         torch.cuda.empty_cache()
         self.block_transform(self.input['data'], output_feat)
         self.input['data'] = output_feat
+
+    def block_opt(self, block):
+        block = block.cuda()
+
+        # Perform forward pass to collect features
+        output_feat = self.block_forward(block)
+        torch.cuda.empty_cache()
+
+        # Transform block using collected features
+        self.block_transform(self.input['data'], output_feat)
+        self.input['data'] = output_feat
+
+        block = block.cpu()
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def block_transform(self, input_feat, output_feat):
         logger.info(f'Start transform the {self.block_idx+1}-th block')
@@ -83,7 +100,7 @@ class ShortGPT(BaseBlockwiseSparsification):
         return layers_to_remove
 
     @torch.no_grad()
-    def deploy(self, deploy_format):
+    def deploy(self, deploy_format, keep_device=False):
         logger.info(f'After compute, BI scores are {self.importances}')
         logger.info('-- deploy_sparsity_model start --')
         logger.info(f'sparsity_config : {self.sparsity_config}')

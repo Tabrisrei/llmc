@@ -801,8 +801,8 @@ class LightllmRealQuantLinear(VllmRealQuantLinear):
 
 
 class SglRealQuantLinear(VllmRealQuantLinear):
-    def __init__(self, weight, bias, scales, input_scale, need_pack):
-        super().__init__(weight, bias, scales, input_scale, need_pack)
+    def __init__(self, weight, bias, scales, input_scale, need_pack, scales_name):
+        super().__init__(weight, bias, scales, input_scale, need_pack, scales_name)
 
     def __repr__(self):
         return (

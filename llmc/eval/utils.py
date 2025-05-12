@@ -87,4 +87,4 @@ def eval_model(model, blockwise_opts, eval_list, eval_pos):
                     res = eval_class.eval(model)
                     eval_name = config_for_eval.eval.type
                     dataset_name = config_for_eval.eval.name
-                    logger.info(f'EVAL: {eval_name} on {dataset_name} is {res}')
+                    logger.info(f'EVAL_{eval_pos}: {eval_name} on {dataset_name} is {res}')

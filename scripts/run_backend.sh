@@ -1,10 +1,5 @@
 #!/bin/bash
 
-
-
-export DATASET_SOURCE='HF'
-export HF_ENDPOINT=https://hf-mirror.com.
-
 llmc=/home/gsb/LLMCMed/llmc
 export PYTHONPATH=$llmc:$PYTHONPATH
 
@@ -26,7 +21,7 @@ company_name=meta-llama
 # company_name=zhaohe9701
 
 # task_name=gptq_w_only_8b_Meta-Llama-3-70B
-# task_name=gptq_w_only_8b_Meta-Llama-3.1-70B
+task_name=gptq_w_only_8b_Meta-Llama-3.1-70B
 # task_name=gptq_w_only_8b_Qwen2.5-7B
 # task_name=gptq_w_only_8b_Qwen2.5-32B
 # task_name=gptq_w_only_8b_Qwen2.5-72B
@@ -41,17 +36,14 @@ company_name=meta-llama
 # task_name=wanda_25_Meta-Llama-3-8B
 # task_name=shortgpt_5_Meta-Llama-3-8B
 
-# task_name=awq_w_only_4b_Meta-Llama-3-8B_config_test
-task_name=gptq_w_only_4b_Meta-Llama-3-8B_config_test
-
 config=${llmc}/configs/AFormalExperimentG/${task_name}.yml
-log_dir=${llmc}/a_experiment_logs/${task_name}_single_save_fake.log
+log_dir=${llmc}/a_experiment_logs/${task_name}.log
 
-rm -rf atrans_models_origin/${company_name}/${task_name}
+rm -rf atrans_models/${company_name}/${task_name}
 # rm -rf atrans_models/Qwen/${task_name}
 
 
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=5
 nnodes=1
 nproc_per_node=1
 
@@ -72,18 +64,19 @@ MASTER_ADDR=127.0.0.1
 MASTER_PORT=$UNUSED_PORT
 task_id=$UNUSED_PORT
 
-# nohup \
+nohup \
 torchrun \
 --nnodes $nnodes \
 --nproc_per_node $nproc_per_node \
 --rdzv_id $task_id \
 --rdzv_backend c10d \
 --rdzv_endpoint $MASTER_ADDR:$MASTER_PORT \
-${llmc}/llmc/__main__.py --config $config --task_id $task_id #\ > ${log_dir} 2>&1 &
-
+${llmc}/llmc/__main__.py --config $config --task_id $task_id \
+> ${log_dir} 2>&1 &
 
 # debug
 # torchrun --nnodes $nnodes --nproc_per_node $nproc_per_node --rdzv_id $task_id --rdzv_backend c10d --rdzv_endpoint $MASTER_ADDR:$MASTER_PORT ${llmc}/llmc/__main__.py --config $config --task_id $task_id
+
 
 # sleep 2
 # ps aux | grep '__main__.py' | grep $task_id | awk '{print $2}' > ${task_name}.pid

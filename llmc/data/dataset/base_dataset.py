@@ -76,6 +76,50 @@ class BaseDataset(metaclass=ABCMeta):
             else:
                 self.calib_dataset = load_from_disk(self.calib_dataset_path)
 
+    # def get_calib_model_inputs(self, samples):
+    #     if not self.padding:
+    #         if self.calib_dataset_name == 'images':
+    #             calib_model_inputs = self.get_batch_process(samples)
+    #         else:
+    #             assert not self.calib_dataset_name == 'custom_mm'
+    #             if self.calib_dataset_name == 'custom_txt':
+    #                 txts = self.batch_process(
+    #                     samples,
+    #                     calib_or_eval='calib',
+    #                     apply_chat_template=self.apply_chat_template,
+    #                     return_inputs=False
+    #                 )
+    #             else:
+    #                 txts = self.calib_dataset
+    #             preproc = PREPROC_REGISTRY[self.preproc]
+    #             preproc_param_dict = {
+    #                 'calib_dataset': txts,
+    #                 'tokenizer': self.tokenizer,
+    #                 'n_samples': self.n_samples,
+    #                 'seq_len': self.seq_len
+    #             }
+    #             if self.preproc == 'txt_general_preproc':
+    #                 preproc_param_dict['key'] = self.key
+    #             samples = preproc(**preproc_param_dict)
+    #             calib_model_inputs = []
+    #             if self.calib_bs < 0:
+    #                 batch = torch.cat(samples, dim=0)
+    #                 calib_model_inputs.append({'input_ids': batch})
+    #             elif self.calib_bs == 1:
+    #                 for i in range(len(samples)):
+    #                     calib_model_inputs.append({'input_ids': samples[i]})
+    #             elif self.calib_bs > 1:
+    #                 for i in range(0, len(samples), self.calib_bs):
+    #                     start = i
+    #                     end = min(i + self.calib_bs, len(samples))
+    #                     batch = samples[start:end]
+    #                     batch = torch.cat(batch, dim=0)
+    #                     calib_model_inputs.append({'input_ids': batch})
+    #     else:
+    #         assert self.calib_dataset_name == 'custom_txt' or self.calib_dataset_name == 'custom_mm'
+    #         calib_model_inputs = self.get_batch_process(samples)
+    #     return calib_model_inputs
+
     def get_calib_model_inputs(self, samples):
         if not self.padding:
             if self.calib_dataset_name == 'images':
@@ -102,23 +146,41 @@ class BaseDataset(metaclass=ABCMeta):
                     preproc_param_dict['key'] = self.key
                 samples = preproc(**preproc_param_dict)
                 calib_model_inputs = []
+
                 if self.calib_bs < 0:
                     batch = torch.cat(samples, dim=0)
-                    calib_model_inputs.append({'input_ids': batch})
+                    attention_mask = (batch != self.tokenizer.pad_token_id).long()
+                    calib_model_inputs.append({
+                        'input_ids': batch,
+                        'attention_mask': attention_mask
+                    })
+
                 elif self.calib_bs == 1:
                     for i in range(len(samples)):
-                        calib_model_inputs.append({'input_ids': samples[i]})
+                        input_ids = samples[i]
+                        attention_mask = (input_ids != self.tokenizer.pad_token_id).long()
+                        calib_model_inputs.append({
+                            'input_ids': input_ids,
+                            'attention_mask': attention_mask
+                        })
+
                 elif self.calib_bs > 1:
                     for i in range(0, len(samples), self.calib_bs):
                         start = i
                         end = min(i + self.calib_bs, len(samples))
                         batch = samples[start:end]
                         batch = torch.cat(batch, dim=0)
-                        calib_model_inputs.append({'input_ids': batch})
+                        attention_mask = (batch != self.tokenizer.pad_token_id).long()
+                        calib_model_inputs.append({
+                            'input_ids': batch,
+                            'attention_mask': attention_mask
+                        })
         else:
-            assert self.calib_dataset_name == 'custom_txt' or self.calib_dataset_name == 'custom_mm'
+            assert self.calib_dataset_name in ['custom_txt', 'custom_mm']
             calib_model_inputs = self.get_batch_process(samples)
+
         return calib_model_inputs
+
 
     def get_batch_process(self, samples):
         calib_model_inputs = []

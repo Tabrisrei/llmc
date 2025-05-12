@@ -7,6 +7,9 @@ from .base_model import BaseModel
 class Llama(BaseModel):
     def __init__(self, config, device_map=None, use_cache=False):
         super().__init__(config, device_map, use_cache)
+        self.find_blocks()
+        self.find_embed_layers()
+        self.find_block_name()
 
     def find_blocks(self):
         self.blocks = self.model.model.layers

@@ -452,7 +452,7 @@ class GPTQ(BaseBlockwiseQuantization):
         return weight
 
     @torch.no_grad()
-    def deploy(self, quant_format):
+    def deploy(self, quant_format, keep_device=False):
         if quant_format not in ['fake_quant', 'origin_float']:
             assert not self.need_perm
         super().deploy(quant_format)

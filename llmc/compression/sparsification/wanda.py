@@ -35,14 +35,17 @@ class Wanda(BaseBlockwiseSparsification):
         self,
         subset,
         input_feat,
-        subset_kwargs,
+        *subset_kwargs,
     ):
-        layers_dict = subset['layers']
-        input_name = subset['input'][0]
 
-        layers = list(layers_dict.values())
-        for layer in layers:
-            scaler_row = self.get_row_scale(layer, input_feat[input_name][0])
+        # layers_dict = subset['layers']
+        layers_dict = subset
+        # input_name = subset['input'][0]
+
+        # layers = list(layers_dict.values())
+
+        for layer_name, layer in layers_dict.items():
+            scaler_row = self.get_row_scale(layer, input_feat[layer_name][0])
             W_metric = torch.abs(layer.weight.data) * torch.sqrt(
                 scaler_row.reshape((1, -1))
             )
@@ -51,6 +54,6 @@ class Wanda(BaseBlockwiseSparsification):
                 torch.zeros_like(W_metric) == 1
             )  # initialize a mask to be all False
             sort_res = torch.sort(W_metric, dim=-1, stable=True)
-            indices = sort_res[1][:, : int(W_metric.shape[1] * self.sparser.sparsity)]
+            indices = sort_res[1][:, : int(W_metric.shape[1] * self.sparsity)]
             W_mask.scatter_(1, indices, True)
             layer.weight.data[W_mask] = 0  # set weights to zero

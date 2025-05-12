@@ -1,0 +1,34 @@
+base:
+    seed: &seed 42
+model:
+    type: Llama
+    path: /home/gsb/LLMCMed/abase_models/meta-llama/Meta-Llama-3-8B
+    torch_dtype: auto
+calib:
+    name: pileval
+    download: True
+    path: /home/gsb/LLMCMed/adatasets/processed/pileval
+    # n_samples: 128
+    n_samples: 16
+    bs: -1
+    # seq_len: 512
+    seq_len: 256
+    preproc: txt_general_preproc
+    seed: *seed
+eval:
+    # eval_pos: [pretrain, transformed, fake_quant]
+    eval_pos: []
+    name: [wikitext2]
+    download: True
+    path: /home/gsb/LLMCMed/adatasets/processed/wikitext/wikitext-2-v1
+    bs: 1
+    seq_len: 2048
+sparse:
+    method: ShortGPT
+    weight:
+        n_prune_layers: 20
+save:
+    # save_trans: True
+    save_fake: True
+    # save_vllm: True
+    save_path: /home/gsb/LLMCMed/atrans_models/meta-llama/shortgpt_20_Meta-Llama-3-8B

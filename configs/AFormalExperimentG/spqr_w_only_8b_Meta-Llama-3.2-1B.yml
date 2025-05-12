@@ -1,0 +1,72 @@
+base:
+    seed: &seed 42
+model:
+    type: Llama
+    # path: /home/gsb/LLMCMed/abase_models/meta-llama/Meta-Llama-3-8B
+    path: /home/gsb/LLMCMed/abase_models/meta-llama/Llama-3.2-1B
+    torch_dtype: auto
+calib:
+    name: wikitext2
+    download: True
+    n_samples: 128
+    path: /home/gsb/datasets/processed/wikitext/wikitext-2-v1
+    bs: 1
+    seq_len: 2048
+    preproc: wikitext2_gptq
+    seed: *seed
+# calib:
+#     name: c4
+#     download: True
+#     n_samples: 128
+#     path: calib data path
+#     bs: 1
+#     seq_len: 2048
+#     preproc: c4_gptq
+#     seed: *seed
+eval:
+    # eval_pos: [pretrain, transformed, fake_quant]
+    eval_pos: [transformed, fake_quant]
+    name: wikitext2
+    download: True
+    path: /home/gsb/LLMCMed/adatasets/processed/wikitext/wikitext-2-v1
+    seq_len: 2048
+    # For 7B / 13B model eval, bs can be set to "1", and inference_per_block can be set to "False".
+    # For 70B model eval, bs can be set to "20", and inference_per_block can be set to "True".
+    bs: 1
+    seq_len: 2048
+    inference_per_block: False
+quant:
+    method: SpQR
+    weight:
+        bit: 4
+        symmetric: False
+        granularity: per_group
+        group_size: 16
+        round_zp: False
+        need_pack: True
+    special:
+        actorder: True
+        percdamp: 1
+        blocksize: 128
+        true_sequential: True
+        relative_threshold: 0.2
+        simplified_outliers: False
+        scale:
+            bit: 3
+            symmetric: False
+            granularity: per_group
+            group_size: 16
+            round_zp: False
+        zero:
+            bit: 3
+            symmetric: False
+            granularity: per_group
+            group_size: 16
+            round_zp: False
+    quant_out: True
+    modality: language
+save:
+    save_fake: False
+    # save_trans: True
+    # save_vllm: True
+    save_path: /home/gsb/LLMCMed/atrans_models/meta-llama/spqr_w_only_8b_Meta-Llama-3.2-1B
