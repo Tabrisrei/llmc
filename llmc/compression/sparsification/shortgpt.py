@@ -23,14 +23,6 @@ class ShortGPT(BaseBlockwiseSparsification):
         super().__init__(model, sparsity_config, input, padding_mask, config)
         self.importances = np.zeros(len(self.blocks))
 
-    def block_opt_origin(self, block):
-        block = block.cuda()
-
-        output_feat = self.block_forward(block)
-        torch.cuda.empty_cache()
-        self.block_transform(self.input['data'], output_feat)
-        self.input['data'] = output_feat
-
     def block_opt(self, block):
         block = block.cuda()
 
@@ -43,6 +35,7 @@ class ShortGPT(BaseBlockwiseSparsification):
         self.input['data'] = output_feat
 
         block = block.cpu()
+        del block
         gc.collect()
         torch.cuda.empty_cache()
 
