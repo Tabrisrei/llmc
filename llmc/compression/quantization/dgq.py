@@ -43,8 +43,8 @@ class DGQ(BaseBlockwiseQuantization):
             self.quant_out = True
         else:
             self.quant_out = False
-        self.quant_type = self.quant_config.get('quant_type', 'int_quant')
-        assert self.quant_type != 'float_quant', 'DGQ do not support Float quant now.'
+        self.quant_type = self.quant_config.get('quant_type', 'int-quant')
+        assert self.quant_type != 'float-quant', 'DGQ do not support Float quant now.'
         # set weight quant config
         self.wquantizer_w4 = IntegerQuantizer(**self.quant_config['weight']['w_1'])
         perchannel_setting = {
@@ -157,6 +157,7 @@ class DGQ(BaseBlockwiseQuantization):
             weight_OxG = weight_tmp[
                 :, group_index * w4_group_size: (group_index + 1) * w4_group_size
             ]
+            # docformatter: off
             """
             For each pair of (inp_LxG weight_OxG),
             we can all consider it as per channel quantization.
@@ -177,6 +178,7 @@ class DGQ(BaseBlockwiseQuantization):
             input x weight is per group quantization.
             The scale shape is [out * (in/G)].
             """
+            # docformatter: on
             org_out_LxO = inp_LxG @ (weight_OxG.t())
             grid = 20
             best_loss = torch.full(

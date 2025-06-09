@@ -12,12 +12,17 @@ from .quant import FloatQuantizer
 from .utils import is_fp8_supported_gpu
 
 if is_fp8_supported_gpu():
-    from .fp8_kernel import act_quant, fp8_gemm, weight_cast_to_bf16
+    from .kernel import act_quant, fp8_gemm, weight_cast_to_bf16
     USE_FP8GEMM_TRITON_KERNEL = True
-    logger.info('import fp8_kernel successful.')
+    logger.info('Successfully imported Triton kernel.')
 else:
     USE_FP8GEMM_TRITON_KERNEL = False
     from .quant import weight_cast_to_bf16
+    logger.info(
+        'Triton kernel not available: non-Hopper GPU detected.\n'
+        'Using LLMC Quantizer implementation instead.'
+    )
+
 
 try:
     import fast_hadamard_transform
@@ -40,13 +45,95 @@ def block_wise_fp8_forward_func(x, w, w_scale, block_size, bias):
     return y
 
 
+class FakeAffineLayerNorm(nn.Module):
+    def __init__(self, norm, shape):
+        super().__init__()
+        self.register_parameter('weight', nn.Parameter(torch.ones(shape, dtype=torch.float)))
+        self.register_parameter('bias', nn.Parameter(torch.ones(shape, dtype=torch.float)))
+        self.norm = norm
+
+    def forward(self, x):
+        return self.norm(x)
+
+    def extra_repr(self):
+        return f'affine=True (emulated), shape={self.weight.shape}'
+
+
+class LlmcWanTransformerBlock(nn.Module):
+    def __init__(self, module):
+        super().__init__()
+
+        self.affine_norm1 = FakeAffineLayerNorm(module.norm1, module.scale_shift_table.shape[-1])
+        self.attn1 = module.attn1
+
+        self.attn2 = module.attn2
+        self.norm2 = module.norm2
+
+        self.affine_norm3 = FakeAffineLayerNorm(module.norm1, module.scale_shift_table.shape[-1])
+        self.ffn = module.ffn
+        self.scale_shift_table = module.scale_shift_table
+
+    def forward(
+        self,
+        hidden_states,
+        encoder_hidden_states,
+        temb,
+        rotary_emb,
+    ):
+        shift_msa, scale_msa, gate_msa, c_shift_msa, c_scale_msa, c_gate_msa = (
+            self.scale_shift_table + temb
+        ).chunk(6, dim=1)
+
+        # 1. Self-attention
+        norm1_weight = (1 + scale_msa) * self.affine_norm1.weight
+        norm1_bias = shift_msa * self.affine_norm1.bias
+
+        norm_hidden_states = (
+            self.affine_norm1(hidden_states.float()) * norm1_weight + norm1_bias
+        ).type_as(hidden_states)
+        attn_output = self.attn1(
+            hidden_states=norm_hidden_states, rotary_emb=rotary_emb
+        )
+        hidden_states = (hidden_states.float() + attn_output * gate_msa).type_as(
+            hidden_states
+        )
+
+        # 2. Cross-attention
+        norm_hidden_states = self.norm2(hidden_states.float()).type_as(hidden_states)
+        attn_output = self.attn2(
+            hidden_states=norm_hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
+        )
+        hidden_states = hidden_states + attn_output
+
+        # 3. Feed-forward
+        norm3_weight = (1 + c_scale_msa) * self.affine_norm3.weight
+        norm3_bias = c_shift_msa * self.affine_norm3.bias
+
+        norm_hidden_states = (
+            self.affine_norm3(hidden_states.float()) * norm3_weight + norm3_bias
+        ).type_as(hidden_states)
+        ff_output = self.ffn(norm_hidden_states)
+        hidden_states = (
+            hidden_states.float() + ff_output.float() * c_gate_msa
+        ).type_as(hidden_states)
+
+        return hidden_states
+
+    @classmethod
+    @torch.no_grad()
+    def new(cls, module):
+        new_module = cls(module)
+        return new_module
+
+
 class LlmcFp8Linear(nn.Module):
-    def __init__(self, in_features, out_features, bias, block_size=128):
+    def __init__(self, in_features, out_features, bias, block_size):
         super().__init__()
         self.block_size = block_size
         self.in_features = in_features
         self.out_features = out_features
-        if bias:
+        if bias is not None:
             self.bias = nn.Parameter(torch.empty(out_features))
         else:
             self.register_parameter('bias', None)
@@ -65,23 +152,28 @@ class LlmcFp8Linear(nn.Module):
         if self.weight.data.dtype == torch.float8_e4m3fn:
             if USE_FP8GEMM_TRITON_KERNEL:
                 y = block_wise_fp8_forward_func(
-                    x, self.weight, self.weight_scale_inv, self.block_size, self.bias
+                    x,
+                    self.weight,
+                    self.weight_scale_inv,
+                    self.block_size,
+                    self.bias
                 )
                 return y
             else:
                 self.weight.data \
                     = weight_cast_to_bf16(self.weight.data,
-                                          self.weight_scale_inv.data).to(torch.bfloat16)
+                                          self.weight_scale_inv.data,
+                                          self.block_size).to(torch.bfloat16)
         y = torch.functional.F.linear(x, self.weight, self.bias)
         return y
 
     @classmethod
     @torch.no_grad()
-    def new(cls, module):
+    def new(cls, module, block_size):
         in_features = module.in_features
         out_features = module.out_features
         bias = module.bias
-        new_module = cls(in_features, out_features, bias)
+        new_module = cls(in_features, out_features, bias, block_size)
         return new_module
 
     def __repr__(self):
@@ -92,6 +184,7 @@ class LlmcFp8Linear(nn.Module):
             + f'bias={self.bias is not None}, '
             + f'weight_shape={self.weight.shape}, '
             + f'weight_dtype={self.weight.dtype}, '
+            + f'block_size={self.block_size}, '
             # + f"scales_shape={self.weight_scale_inv.shape}, "
             # + f"scales_dtype={self.weight_scale_inv.dtype}, "
             + f'use_fp8gemm_triton_kernel={USE_FP8GEMM_TRITON_KERNEL})'
@@ -136,7 +229,7 @@ class RectifiedSigmoid(nn.Module):
         )
 
     def inverse(self, y):
-        """return x that satisfies y = RectifiedSigmoid(x)"""
+        """Return x that satisfies y = RectifiedSigmoid(x)"""
         return -torch.log((self.zeta - self.gamma) / (y - self.gamma) - 1)
 
 
@@ -320,7 +413,7 @@ class OriginFloatLinear(nn.Module):
         if self.weight.data.dtype == torch.float8_e4m3fn:
             self.fp8_forward = True
             self.weight_scale_inv = ori_module.weight_scale_inv
-            self.block_size = 128
+            self.block_size = ori_module.block_size
         else:
             self.fp8_forward = False
 
@@ -516,7 +609,7 @@ class FakeQuantLinear(nn.Module):
         if self.weight.data.dtype == torch.float8_e4m3fn:
             self.fp8_forward = True
             self.weight_scale_inv = ori_module.weight_scale_inv
-            self.block_size = 128
+            self.block_size = ori_module.block_size
         else:
             self.fp8_forward = False
 
@@ -606,7 +699,7 @@ class EffcientFakeQuantLinear(nn.Module):
         if self.weight.data.dtype == torch.float8_e4m3fn:
             self.fp8_forward = True
             self.weight_scale_inv = ori_module.weight_scale_inv
-            self.block_size = 128
+            self.block_size = ori_module.block_size
         else:
             self.fp8_forward = False
 
@@ -730,7 +823,9 @@ class VllmRealQuantLinear(nn.Module):
     def quant_pack(cls, module, w_q, quant_config):
         if module.weight.data.dtype == torch.float8_e4m3fn:
             module.weight.data = weight_cast_to_bf16(
-                module.weight.data, module.weight_scale_inv.data
+                module.weight.data,
+                module.weight_scale_inv.data,
+                module.block_size
             ).to(torch.bfloat16)
         weight, scales, zeros = w_q(module)
         need_pack = quant_config['weight'].get('need_pack', False)
@@ -782,12 +877,31 @@ class VllmRealQuantLinear(nn.Module):
 
 
 class LightllmRealQuantLinear(VllmRealQuantLinear):
-    def __init__(self, weight, bias, scales, input_scale, need_pack):
-        super().__init__(weight, bias, scales, input_scale, need_pack)
+    def __init__(self, weight, bias, scales, input_scale, need_pack, scales_name):
+        super().__init__(weight, bias, scales, input_scale, need_pack, scales_name)
 
     def __repr__(self):
         return (
             'LightllmRealQuantLinear('
+            + f'in_features={self.in_features}, '
+            + f'out_features={self.out_features}, '
+            + f'bias={self.bias is not None}, '
+            + f'weight_shape={self.weight_shape}, '
+            + f'weight_dtype={self.weight_dtype}, '
+            + f'scales_shape={self.scales_shape}, '
+            + f'scales_dtype={self.scales_dtype}, '
+            + f'zeros_shape={self.zeros_shape}, '
+            + f'zeros_dtype={self.zeros_dtype})'
+        )
+
+
+class Lightx2vRealQuantLinear(VllmRealQuantLinear):
+    def __init__(self, weight, bias, scales, input_scale, need_pack, scales_name):
+        super().__init__(weight, bias, scales, input_scale, need_pack, scales_name)
+
+    def __repr__(self):
+        return (
+            'Lightx2vRealQuantLinear('
             + f'in_features={self.in_features}, '
             + f'out_features={self.out_features}, '
             + f'bias={self.bias is not None}, '
@@ -873,135 +987,82 @@ class AutoawqRealQuantLinear(nn.Module):
     def quant_pack(cls, module, w_q, quant_config):
         if module.weight.data.dtype == torch.float8_e4m3fn:
             module.weight.data = weight_cast_to_bf16(
-                module.weight.data, module.weight_scale_inv.data
+                module.weight.data,
+                module.weight_scale_inv.data,
+                module.block_size
             ).to(torch.bfloat16)
-        weight, scales, zeros = w_q(module)
+        _, scales, zeros = w_q(module)
         pack_version = quant_config['weight']['pack_version']
         if pack_version == 'gemm_pack':
             int_weight, scales, int_zeros = cls.gemm_pack(
-                weight, scales, zeros, quant_config
+                module, module.weight.data, scales, zeros, quant_config
             )
-        elif pack_version == 'gemv_pack':
-            int_weight, scales, int_zeros = cls.gemv_pack(
-                module, weight, scales, zeros, quant_config
-            )
+        else:
+            raise NotImplementedError(f'Not support {pack_version}.')
         return int_weight, scales, int_zeros
 
     @classmethod
     @torch.no_grad()
-    def gemm_pack(self, weight, scales, zeros, quant_config):
+    def gemm_pack(self, module, weight, scales, zeros, quant_config):
 
-        if zeros is not None:
-            zeros = zeros.t().contiguous()
-        scales = scales.t().contiguous()
-        weight = weight.t().contiguous()
+        assert scales is not None and zeros is not None
+        scales = scales.t().contiguous().to(torch.float16)
+        zeros = zeros.t().contiguous()
+
+        scale_zeros = zeros * scales
 
         bit = quant_config['weight']['bit']
         pack_num = 32 // bit
+        group_size = quant_config['weight']['group_size']
 
-        int_weight = torch.zeros(
-            (weight.shape[0], weight.shape[1] // 32 * bit),
+        intweight = []
+
+        awq_linear_in_features = module.in_features
+
+        for idx in range(awq_linear_in_features):
+            intweight.append(
+                torch.round(
+                    (weight.data[:, idx] + scale_zeros[idx // group_size])
+                    / scales[idx // group_size]
+                ).to(torch.int)[:, None]
+            )
+        intweight = torch.cat(intweight, dim=1)
+        intweight = intweight.t().contiguous()
+        intweight = intweight.to(dtype=torch.int32)
+        intweight = intweight.cuda()
+
+        qweight = torch.zeros(
+            (intweight.shape[0], intweight.shape[1] // 32 * bit),
             dtype=torch.int32,
-            device=weight.device,
+            device=intweight.device,
         )
-
-        for col in range(weight.shape[1] // pack_num):
+        for col in range(intweight.shape[1] // pack_num):
             if bit == 4:
                 order_map = [0, 2, 4, 6, 1, 3, 5, 7]
             else:
                 raise NotImplementedError('Only 4-bit are supported for now.')
             for i in range(pack_num):
-                int_weight_col = weight[:, col * pack_num + order_map[i]]
-                int_weight[:, col] |= int_weight_col << (i * bit)
+                qweight_col = intweight[:, col * pack_num + order_map[i]]
+                qweight[:, col] |= qweight_col << (i * bit)
 
-        if zeros is not None:
-            int_zeros = torch.zeros(
-                (zeros.shape[0], zeros.shape[1] // 32 * bit),
-                dtype=torch.int32,
-                device=zeros.device,
-            )
-
-            for col in range(zeros.shape[1] // pack_num):
-                if bit == 4:
-                    order_map = [0, 2, 4, 6, 1, 3, 5, 7]
-                else:
-                    raise NotImplementedError('Only 4-bit are supported for now.')
-                for i in range(pack_num):
-                    intzero_col = zeros[:, col * pack_num + order_map[i]]
-                    int_zeros[:, col] |= intzero_col << (i * bit)
-        else:
-            int_zeros = None
-        del weight
-        return int_weight, scales, int_zeros
-
-    @classmethod
-    @torch.no_grad()
-    def gemv_pack(self, module, weight, scales, zeros, quant_config):
-
-        bit = quant_config['weight']['bit']
-        group_size = quant_config['weight']['group_size']
-        pack_num = 32 // bit
-
-        q_scales = torch.zeros(
-            (
-                scales.shape[0],
-                calculate_zeros_width(module.in_features, group_size) * pack_num,
-            ),
-            dtype=torch.float16,
-            device=scales.device,
-        )
-        q_scales[:, : scales.shape[1]] = scales
-
-        int_weight = torch.zeros(
-            (weight.shape[0], weight.shape[1] // 32 * bit),
+        zeros = zeros.to(dtype=torch.int32, device='cuda')
+        qzeros = torch.zeros(
+            (zeros.shape[0], zeros.shape[1] // 32 * bit),
             dtype=torch.int32,
-            device=weight.device,
+            device=zeros.device,
         )
 
-        for col in range(weight.shape[1] // pack_num):
+        for col in range(zeros.shape[1] // pack_num):
             if bit == 4:
-                order_map = [0, 1, 2, 3, 4, 5, 6, 7]
+                order_map = [0, 2, 4, 6, 1, 3, 5, 7]
             else:
                 raise NotImplementedError('Only 4-bit are supported for now.')
             for i in range(pack_num):
-                int_weight_col = weight[:, col * pack_num + order_map[i]]
-                int_weight[:, col] |= int_weight_col << (i * bit)
+                qzero_col = zeros[:, col * pack_num + order_map[i]]
+                qzeros[:, col] |= qzero_col << (i * bit)
 
-        if zeros is not None:
-            int_zeros = torch.zeros(
-                (zeros.shape[0], calculate_zeros_width(module.in_features, group_size)),
-                dtype=torch.int32,
-                device=zeros.device,
-            )
-
-            for col in range(zeros.shape[1] // pack_num):
-                if bit == 4:
-                    order_map = [0, 1, 2, 3, 4, 5, 6, 7]
-                else:
-                    raise NotImplementedError('Only 4-bit are supported for now.')
-                for i in range(pack_num):
-                    if col * pack_num + order_map[i] >= zeros.shape[1]:
-                        continue
-                    int_zero_col = zeros[:, col * pack_num + order_map[i]]
-                    int_zeros[:, col] |= int_zero_col << (i * bit)
-        else:
-            int_zeros = None
-
-        return int_weight, q_scales, int_zeros
-
-    def __repr__(self):
-        return (
-            'AutoawqRealQuantLinear('
-            + f'in_features={self.in_features}, '
-            + f'out_features={self.out_features}, '
-            + f'bias={self.bias is not None}, '
-            + f'weight_shape={self.weight_shape}, '
-            + f'weight_dtype={self.weight_dtype}, '
-            + f'scales_shape={self.scales_shape}, '
-            + f'scales_dtype={self.scales_dtype}, '
-            + f'zeros_shape={self.zeros_shape}, '
-            + f'zeros_dtype={self.zeros_dtype})'
-        )
+        del weight
+        return qweight, scales, qzeros
 
 
 class MlcllmRealQuantLinear(AutoawqRealQuantLinear):
@@ -1073,4 +1134,5 @@ _REALQUANT_LINEAR_MAP_ = {
     'sgl_quant': SglRealQuantLinear,
     'autoawq_quant': AutoawqRealQuantLinear,
     'mlcllm_quant': MlcllmRealQuantLinear,
+    'lightx2v_quant': Lightx2vRealQuantLinear,
 }

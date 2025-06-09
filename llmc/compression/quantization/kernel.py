@@ -1,5 +1,3 @@
-from typing import Tuple
-
 import torch
 import triton
 import triton.language as tl
@@ -30,9 +28,7 @@ def act_quant_kernel(x_ptr, y_ptr, s_ptr, BLOCK_SIZE: tl.constexpr):
     tl.store(s_ptr + pid, s)
 
 
-def act_quant(
-    x: torch.Tensor, block_size: int = 128
-) -> Tuple[torch.Tensor, torch.Tensor]:
+def act_quant(x, block_size=128):
     """Quantizes the input tensor `x` using block-wise quantization.
 
     Args:
@@ -58,21 +54,7 @@ def act_quant(
 
 
 @triton.jit
-def weight_cast_to_fp8_kernel(x_ptr, s_ptr, y_ptr, M, N, BLOCK_SIZE: tl.constexpr):
-    """Quantizes weights using the provided scaling factors and stores the
-    result.
-
-    Args:
-        x_ptr (tl.pointer): Pointer to the dequantized weights.
-        s_ptr (tl.pointer): Pointer to the scaling factors.
-        y_ptr (tl.pointer): Pointer to the output buffer for quantized weights.
-        M (int): Number of rows in the weight matrix.
-        N (int): Number of columns in the weight matrix.
-        BLOCK_SIZE (tl.constexpr): Size of the block for tiling.
-
-    Returns:
-        None
-    """
+def weight_cast_to_fp8_kernel(x_ptr, y_ptr, s_ptr, M, N, BLOCK_SIZE: tl.constexpr):
     pid_m = tl.program_id(axis=0)
     pid_n = tl.program_id(axis=1)
     n = tl.cdiv(N, BLOCK_SIZE)
@@ -80,42 +62,25 @@ def weight_cast_to_fp8_kernel(x_ptr, s_ptr, y_ptr, M, N, BLOCK_SIZE: tl.constexp
     offs_n = pid_n * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     offs = offs_m[:, None] * N + offs_n[None, :]
     mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-    x = tl.load(x_ptr + offs, mask=mask).to(tl.float32)  # Dequantized values
-    s = tl.load(s_ptr + pid_m * n + pid_n)  # Scaling factors
+    x = tl.load(x_ptr + offs, mask=mask).to(tl.float32)
+    s = tl.max(tl.abs(x)) / 448.
     y = x / s
-
-    # Store the quantized result
+    y = y.to(y_ptr.dtype.element_ty)
     tl.store(y_ptr + offs, y, mask=mask)
+    tl.store(s_ptr + pid_m * n + pid_n, s)
 
 
-def weight_cast_to_fp8(
-    x: torch.Tensor, s: torch.Tensor, block_size: int = 128
-) -> torch.Tensor:
-    """Quantizes the given weight tensor using the provided scale tensor.
-
-    Args:
-        x (torch.Tensor): The dequantized weight tensor of shape (M, N).
-        s (torch.Tensor): The scale tensor of shape (M, N).
-        block_size (int, optional): The block size to use for quantization. Defaults to 128.
-
-    Returns:
-        torch.Tensor: The quantized weight tensor of the same shape as `x`.
-
-    Raises:
-        AssertionError: If `x` or `s` are not contiguous or if their dimensions are not 2.
-    """
-    assert x.is_contiguous() and s.is_contiguous(), 'Input tensors must be contiguous'
-    assert x.dim() == 2 and s.dim() == 2, 'Input tensors must have 2 dimensions'
+def weight_cast_to_fp8(x, block_size=128):
+    assert x.is_contiguous()
+    assert x.dim() == 2
     M, N = x.size()
-    y = torch.empty_like(
-        x, dtype=torch.float8_e4m3fn
-    )  # Set the appropriate dtype (e.g., int8 for quantization)
-    grid = lambda meta: ( # noqa
-        triton.cdiv(M, meta['BLOCK_SIZE']),
-        triton.cdiv(N, meta['BLOCK_SIZE']),
-    )
-    weight_cast_to_fp8_kernel[grid](x, s, y, M, N, BLOCK_SIZE=block_size)
-    return y
+    y = torch.empty_like(x, dtype=torch.float8_e4m3fn)
+    sM = torch.tensor(1.0 * M / block_size).ceil().int()
+    sN = torch.tensor(1.0 * N / block_size).ceil().int()
+    s = x.new_empty(sM, sN, dtype=torch.float32)
+    grid = lambda meta: (triton.cdiv(M, meta['BLOCK_SIZE']), triton.cdiv(N, meta['BLOCK_SIZE']))  # noqa
+    weight_cast_to_fp8_kernel[grid](x, y, s, M, N, BLOCK_SIZE=block_size)
+    return y, s
 
 
 @triton.jit
@@ -147,9 +112,7 @@ def weight_cast_to_bf16_kernel(x_ptr, s_ptr, y_ptr, M, N, BLOCK_SIZE: tl.constex
     tl.store(y_ptr + offs, y, mask=mask)
 
 
-def weight_cast_to_bf16(
-    x: torch.Tensor, s: torch.Tensor, block_size: int = 128
-) -> torch.Tensor:
+def weight_cast_to_bf16(x, s, block_size=128):
     """Dequantizes the given weight tensor using the provided scale tensor.
 
     Args:

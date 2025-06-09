@@ -25,8 +25,10 @@ class BaseDataset(metaclass=ABCMeta):
         self.load_from_txt = calib_cfg.get('load_from_txt', False)
         self.calib_dataset_path = calib_cfg.get('path', None)
         self.apply_chat_template = calib_cfg.get('apply_chat_template', False)
-        self.n_samples = calib_cfg['n_samples']
+        self.n_samples = calib_cfg.get('n_samples', None)
         self.calib_bs = calib_cfg['bs']
+        if self.calib_dataset_name in ['t2v', 'i2v']:
+            assert self.calib_bs == 1
         self.seq_len = calib_cfg.get('seq_len', None)
         self.preproc = calib_cfg.get('preproc', False)
         if self.calib_dataset_name == 'ultrachat':
@@ -34,14 +36,14 @@ class BaseDataset(metaclass=ABCMeta):
         if self.preproc == 'original_txt':
             assert self.seq_len is None
         self.seed = calib_cfg['seed']
-        self.dataset_key = {
+        self.calib_dataset_field_map = {
             'pileval': 'text',
             'c4': 'text',
             'wikitext2': 'text',
             'ptb': 'sentence',
         }
-        if self.calib_dataset_name in self.dataset_key:
-            self.key = self.dataset_key[self.calib_dataset_name]
+        if self.calib_dataset_name in self.calib_dataset_field_map:
+            self.key = self.calib_dataset_field_map[self.calib_dataset_name]
         self.build_calib_dataset()
 
     def build_calib_dataset(self):
@@ -71,8 +73,14 @@ class BaseDataset(metaclass=ABCMeta):
             else:
                 raise Exception(f'Not support {self.calib_dataset_name} dataset.')
         else:
-            if self.calib_dataset_name == 'custom_txt' or self.calib_dataset_name == 'custom_mm' or self.calib_dataset_name == 'images': # noqa
-                self.calib_dataset = self.get_cutomdata(self.calib_dataset_path)
+            if self.calib_dataset_name in [
+                'custom_txt',
+                'custom_mm',
+                'images',
+                't2v',
+                'i2v',
+            ]:
+                self.calib_dataset = self.get_custom_dataset(self.calib_dataset_path)
             else:
                 self.calib_dataset = load_from_disk(self.calib_dataset_path)
 
@@ -122,7 +130,9 @@ class BaseDataset(metaclass=ABCMeta):
 
     def get_calib_model_inputs(self, samples):
         if not self.padding:
-            if self.calib_dataset_name == 'images':
+            if self.calib_dataset_name in ['t2v', 'i2v']:
+                calib_model_inputs = samples
+            elif self.calib_dataset_name == 'images':
                 calib_model_inputs = self.get_batch_process(samples)
             else:
                 assert not self.calib_dataset_name == 'custom_mm'
@@ -131,7 +141,7 @@ class BaseDataset(metaclass=ABCMeta):
                         samples,
                         calib_or_eval='calib',
                         apply_chat_template=self.apply_chat_template,
-                        return_inputs=False
+                        return_inputs=False,
                     )
                 else:
                     txts = self.calib_dataset
@@ -140,14 +150,13 @@ class BaseDataset(metaclass=ABCMeta):
                     'calib_dataset': txts,
                     'tokenizer': self.tokenizer,
                     'n_samples': self.n_samples,
-                    'seq_len': self.seq_len
+                    'seq_len': self.seq_len,
                 }
                 if self.preproc == 'txt_general_preproc':
                     preproc_param_dict['key'] = self.key
                 samples = preproc(**preproc_param_dict)
                 calib_model_inputs = []
-
-                if self.calib_bs < 0:
+                if self.calib_bs == -1:
                     batch = torch.cat(samples, dim=0)
                     attention_mask = (batch != self.tokenizer.pad_token_id).long()
                     calib_model_inputs.append({
@@ -176,7 +185,10 @@ class BaseDataset(metaclass=ABCMeta):
                             'attention_mask': attention_mask
                         })
         else:
-            assert self.calib_dataset_name in ['custom_txt', 'custom_mm']
+            assert (
+                self.calib_dataset_name == 'custom_txt'
+                or self.calib_dataset_name == 'custom_mm'
+            )
             calib_model_inputs = self.get_batch_process(samples)
 
         return calib_model_inputs
@@ -184,16 +196,23 @@ class BaseDataset(metaclass=ABCMeta):
 
     def get_batch_process(self, samples):
         calib_model_inputs = []
-        if self.calib_bs < 0:
+        if self.calib_bs == -1:
             calib_model_inputs.append(
                 self.batch_process(
                     samples,
                     calib_or_eval='calib',
-                    apply_chat_template=self.apply_chat_template
+                    apply_chat_template=self.apply_chat_template,
                 )
             )
         elif self.calib_bs == 1:
-            calib_model_inputs = [self.batch_process([sample], calib_or_eval='calib', apply_chat_template=self.apply_chat_template) for sample in samples] # noqa
+            calib_model_inputs = [
+                self.batch_process(
+                    [sample],
+                    calib_or_eval='calib',
+                    apply_chat_template=self.apply_chat_template,
+                )
+                for sample in samples
+            ]
         elif self.calib_bs > 1:
             for i in range(0, len(samples), self.calib_bs):
                 start = i
@@ -203,25 +222,30 @@ class BaseDataset(metaclass=ABCMeta):
                     self.batch_process(
                         batch,
                         calib_or_eval='calib',
-                        apply_chat_template=self.apply_chat_template
+                        apply_chat_template=self.apply_chat_template,
                     )
                 )
         return calib_model_inputs
 
     def get_calib_dataset(self):
-        samples = self.calib_dataset[int(os.environ['RANK'])::int(os.environ['WORLD_SIZE'])]
+        samples = self.calib_dataset[
+            int(os.environ['RANK'])::int(os.environ['WORLD_SIZE'])
+        ]
         logger.info(f'len(samples) rank : {len(samples)}')
 
         calib_model_inputs = self.get_calib_model_inputs(samples)
         logger.info(f'len(calib_model_inputs) : {len(calib_model_inputs)}')
         if self.padding:
-            padding_mask = [calib_model_input['attention_mask'] for calib_model_input in calib_model_inputs] # noqa
+            padding_mask = [
+                calib_model_input['attention_mask']
+                for calib_model_input in calib_model_inputs
+            ]
         else:
             padding_mask = None
         return calib_model_inputs, padding_mask
 
-    def get_cutomdata(self, custom_dataset):
-        audio_img_qa_json = os.path.join(custom_dataset, 'samples.json')
+    def get_custom_dataset(self, custom_dataset_path):
+        audio_img_qa_json = os.path.join(custom_dataset_path, 'samples.json')
         fp = open(audio_img_qa_json)
         custom_data_samples = json.load(fp)
         for idx in range(len(custom_data_samples)):
@@ -229,11 +253,11 @@ class BaseDataset(metaclass=ABCMeta):
                 if isinstance(custom_data_samples[idx]['audio'], list):
                     for audio_idx in range(len(custom_data_samples[idx]['audio'])):
                         custom_data_samples[idx]['audio'][audio_idx] = os.path.join(
-                            custom_dataset, custom_data_samples[idx]['audio'][audio_idx]
+                            custom_dataset_path, custom_data_samples[idx]['audio'][audio_idx]
                         )
                 else:
                     custom_data_samples[idx]['audio'] = os.path.join(
-                        custom_dataset, custom_data_samples[idx]['audio']
+                        custom_dataset_path, custom_data_samples[idx]['audio']
                     )
             else:
                 custom_data_samples[idx]['audio'] = None
@@ -241,11 +265,11 @@ class BaseDataset(metaclass=ABCMeta):
                 if isinstance(custom_data_samples[idx]['image'], list):
                     for img_idx in range(len(custom_data_samples[idx]['image'])):
                         custom_data_samples[idx]['image'][img_idx] = os.path.join(
-                            custom_dataset, custom_data_samples[idx]['image'][img_idx]
+                            custom_dataset_path, custom_data_samples[idx]['image'][img_idx]
                         )
                 else:
                     custom_data_samples[idx]['image'] = os.path.join(
-                        custom_dataset, custom_data_samples[idx]['image']
+                        custom_dataset_path, custom_data_samples[idx]['image']
                     )
             else:
                 custom_data_samples[idx]['image'] = None
@@ -253,4 +277,8 @@ class BaseDataset(metaclass=ABCMeta):
                 custom_data_samples[idx]['question'] = ''
             if 'answer' not in custom_data_samples[idx]:
                 custom_data_samples[idx]['answer'] = ''
+            if 'prompt' not in custom_data_samples[idx]:
+                custom_data_samples[idx]['prompt'] = ''
+            if 'negative_prompt' not in custom_data_samples[idx]:
+                custom_data_samples[idx]['negative_prompt'] = ''
         return custom_data_samples

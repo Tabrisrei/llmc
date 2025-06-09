@@ -17,9 +17,6 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from llmc.compression.quantization.module_utils import (
     _LLMC_LINEAR_TYPES_, _LLMC_LN_TYPES_, _TRANSFORMERS_LINEAR_TYPES_,
     _TRANSFORMERS_LN_TYPES_, LlmcFp8Linear)
-from llmc.compression.quantization.utils import (check_do_quant, check_w_only,
-                                                 get_aquantizer,
-                                                 get_wquantizer)
 
 
 class BaseModel(metaclass=ABCMeta):
@@ -38,16 +35,20 @@ class BaseModel(metaclass=ABCMeta):
         self.vision_projector = None
         self.audio_model = None
         self.audio_projector = None
-        self.modality = None
+        self.modality = 'language'
         self.kvcache_buffer = []
         self.build_tokenizer()
         self.build_model()
-        self.model.eval()
+        try:
+            self.model.eval()
+        except: # noqa
+            pass
+        self.update_key_info()
         if self.mm_model:
             self.mm_model.eval()
 
     def set_modality(self, modality='language'):
-        assert modality in ['audio', 'vision', 'language']
+        assert modality in ['audio', 'vision', 'language', 'video_gen']
         self.modality = modality
         self.update_key_info()
 
@@ -115,7 +116,7 @@ class BaseModel(metaclass=ABCMeta):
         pass
 
     def build_tokenizer(self):
-        if self.model_type not in ['Vit']:
+        if self.model_type not in ['Vit', 'WanT2V', 'WanI2V']:
             assert self.tokenizer_mode in ['fast', 'slow']
             self.tokenizer = AutoTokenizer.from_pretrained(
                 self.model_path, use_fast=self.tokenizer_mode, trust_remote_code=True
@@ -204,9 +205,16 @@ class BaseModel(metaclass=ABCMeta):
                                                               torch_dtype=torch.float16,
                                                               trust_remote_code=True)
             self.find_blocks()
+            self.fp8_block_size \
+                = self.model_config.quantization_config['weight_block_size'][0]
             for block_idx, block in enumerate(self.blocks):
-                self.replace_module_block(LlmcFp8Linear, block, block_idx, {})
+                self.replace_module_block(LlmcFp8Linear,
+                                          block,
+                                          block_idx,
+                                          {'block_size': self.fp8_block_size})
             self.load_fp8_weight()
+
+            logger.info(f'fp8 block size: {self.fp8_block_size}')
         else:
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_path,
@@ -355,67 +363,6 @@ class BaseModel(metaclass=ABCMeta):
     def get_moe_gate(self, block):
         return None
 
-    def set_mix_bits_params_dict(self, block_idx, name, params_dict):
-
-        logger.info('set_mix_bits_params_dict')
-
-        if not check_do_quant(
-            block_idx,
-            name,
-            params_dict['mix_bits_map'],
-            params_dict['quantizer_mix_bits'],
-        ):
-            logger.info(
-                f'This layer {name} in {block_idx}-th block is set to float.'
-                'No need to replace this layer.'
-            )
-            return params_dict
-
-        params_mix_dict = {}
-        params_mix_dict['debug_print'] = {}
-        wquantizer = get_wquantizer(
-            block_idx,
-            name,
-            params_dict['mix_bits_map'],
-            params_dict['quantizer_mix_bits'],
-            params_dict['wquantizer_default'],
-        )
-        params_mix_dict['w_qdq'] = partial(params_dict['w_qdq'], wquantizer=wquantizer)
-        params_mix_dict['debug_print']['weight'] = {}
-        params_mix_dict['debug_print']['weight']['bit'] = wquantizer.bit
-        params_mix_dict['debug_print']['weight']['sym'] = wquantizer.sym
-        params_mix_dict['debug_print']['weight']['granularity'] = wquantizer.granularity
-        if wquantizer.granularity == 'per_group':
-            params_mix_dict['debug_print']['weight'][
-                'group_size'
-            ] = wquantizer.group_size
-        if not check_w_only(
-            block_idx,
-            name,
-            params_dict['mix_bits_map'],
-            params_dict['quantizer_mix_bits'],
-            params_dict['w_only_default'],
-        ):
-            aquantizer = get_aquantizer(
-                block_idx,
-                name,
-                params_dict['mix_bits_map'],
-                params_dict['quantizer_mix_bits'],
-                params_dict['aquantizer_default'],
-            )
-            params_mix_dict['a_qdq'] = partial(
-                params_dict['a_qdq'], aquantizer=aquantizer
-            )
-            params_mix_dict['debug_print']['act'] = {}
-            params_mix_dict['debug_print']['act']['bit'] = aquantizer.bit
-            params_mix_dict['debug_print']['act']['sym'] = aquantizer.sym
-            params_mix_dict['debug_print']['act'][
-                'granularity'
-            ] = aquantizer.granularity
-        else:
-            params_mix_dict['a_qdq'] = None
-        return params_mix_dict
-
     def replace_vision_module_all(self, module, params_dict, keep_device=False):
         vision_model_linears = self.get_block_linears(self.vision_model)
         for name, m in vision_model_linears.items():
@@ -437,6 +384,19 @@ class BaseModel(metaclass=ABCMeta):
         logger.info(f'The Replaced vision_model: {self.vision_model}')
 
     def replace_language_module_all(self, module, params_dict, keep_device=False):
+        for block_idx in range(len(self.blocks)):
+            logger.info(f'Replace block index: {block_idx}/{len(self.blocks)}')
+            if keep_device:
+                self.replace_module_block(module, self.blocks[block_idx], block_idx, params_dict)
+            else:
+                self.blocks[block_idx].cuda()
+                self.replace_module_block(module, self.blocks[block_idx], block_idx, params_dict)
+                self.blocks[block_idx].cpu()
+            gc.collect()
+            torch.cuda.empty_cache()
+        logger.info(f'The Replaced model: {self.model}')
+
+    def replace_video_gen_module_all(self, module, params_dict, keep_device=False):
         for block_idx in range(len(self.blocks)):
             logger.info(f'Replace block index: {block_idx}/{len(self.blocks)}')
             if keep_device:
@@ -473,16 +433,8 @@ class BaseModel(metaclass=ABCMeta):
         for name, m in layers_dict.items():
             if hasattr(m, 'no_quant') and m.no_quant:
                 continue
-            # mix bits
-            params_tmp_dict = {}
-            if 'mix_bits' in params_dict and params_dict['mix_bits']:
-                params_tmp_dict = self.set_mix_bits_params_dict(
-                    block_idx, name, params_dict
-                )
-            else:
-                params_tmp_dict = params_dict
 
-            M = module.new(m, **params_tmp_dict)
+            M = module.new(m, **params_dict)
 
             name_tmp = name.rsplit('.', 1)
             if len(name_tmp) == 2:

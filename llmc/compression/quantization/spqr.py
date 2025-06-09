@@ -50,8 +50,8 @@ class SpQR(BaseBlockwiseQuantization):
         scale_config = special_config['scale']
         zero_config = special_config['zero']
 
-        self.quant_type = self.quant_config.get('quant_type', 'int_quant')
-        assert self.quant_type != 'float_quant', 'SPQR do not support Float quant now.'
+        self.quant_type = self.quant_config.get('quant_type', 'int-quant')
+        assert self.quant_type != 'float-quant', 'SPQR do not support Float quant now.'
         self.scale_quantizer = IntegerQuantizer(**scale_config)
         self.zero_quantizer = IntegerQuantizer(**zero_config)
         self.Q = IntegerQuantizer(
@@ -321,7 +321,7 @@ class SpQR(BaseBlockwiseQuantization):
 
     @torch.no_grad()
     def get_group_qparams(self, c_tensor, idx):
-        """get qparams for a group, idx is the index of a column within a
+        """Get qparams for a group, idx is the index of a column within a
         group, c_tensor is a group."""
         _, s, z, qmax, qmin = self.wquantizer.get_tensor_qparams(c_tensor)
         _, ss, zs, Ps, Ns = self.scale_quantizer.get_tensor_qparams(s)

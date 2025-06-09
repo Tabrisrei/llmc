@@ -18,15 +18,16 @@ class VQAEval:
     def __init__(self, config):
         self.eval_config = config.eval
         self.model_path = config.model.path
-        self.dataset = self.eval_config['name']
-        if not isinstance(self.dataset, list):
-            self.dataset = [self.dataset, ]
+        self.eval_dataset_name = self.eval_config['name']
+        if not isinstance(self.eval_dataset_name, list):
+            self.eval_dataset_name = [self.eval_dataset_name, ]
         self.eval_dataset_path = self.eval_config['path']
         self.eval_bs = self.eval_config['bs']
 
     def eval(
         self,
         llmc_model,
+        eval_class: Optional[str] = None,
         model_args: Optional[Union[str, dict]] = None,
         tasks: Optional[List[Union[str, dict, object]]] = None,
         num_fewshot: Optional[int] = None,
@@ -61,7 +62,7 @@ class VQAEval:
         model = llmc_model.eval_name
         model_args = 'pretrained=' + self.model_path + ',device_map=auto'
         batch_size = self.eval_bs
-        tasks = self.dataset
+        tasks = self.eval_dataset_name
         num_fewshot = 0
 
         seed_message = []
@@ -120,7 +121,7 @@ class VQAEval:
 
                 else:
                     task_obj = task_dict[task_name]
-                    if type(task_obj) == tuple:
+                    if isinstance(task_obj, tuple):
                         group, task_obj = task_obj
                         if task_obj is None:
                             continue
