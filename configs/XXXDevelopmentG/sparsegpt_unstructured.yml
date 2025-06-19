@@ -1,0 +1,59 @@
+base:
+    seed: &seed 42
+model:
+    type: Llama
+    # path: /home/gsb/LLMCMed/abase_models/meta-llama/Meta-Llama-3-8B
+    path: /home/gsb/LLMCMed/abase_models/meta-llama/llama-2-7b
+    torch_dtype: auto
+calib:
+    # name: pileval
+    # download: True
+    # path: /home/gsb/LLMCMed/adatasets/processed/pileval
+    # n_samples: 128
+    # # n_samples: 16
+    # bs: -1
+    # seq_len: 4096
+    # preproc: txt_general_preproc
+    # seed: *seed
+    
+    name: c4
+    download: True
+    # path: /home/gsb/LLMCMed/adatasets/processed/pileval
+    path: /home/gsb/LLMCMed/adatasets/processed/c4
+    n_samples: 128
+    # n_samples: 16
+    bs: -1
+    seq_len: 4096
+    preproc: txt_general_preproc
+    seed: *seed
+eval:
+    eval_pos: [transformed]
+    # eval_pos: []
+    name: [wikitext2]
+    download: True
+    path: /home/gsb/LLMCMed/adatasets/processed/wikitext/wikitext-2-v1
+    bs: 1
+    seq_len: 4096
+sparse:
+    method: SparseGPT
+    weight:
+        sparsity: 0.5
+        # granularity: per_group
+        # group_size: 128
+    special:
+        # actorder: False
+        # static_groups: False
+        pattern: structured # unstructured, semi_structured, structured
+        granularity: channel_wise # channel, group, token, block
+        prunen: 2
+        prunem: 4
+        percdamp: 0.01
+        blocksize: 128
+        true_sequential: True
+        # owq: True
+        #target bit is 4.01
+        # n_outs: [6, 6, 6, 6, 2, 2, 6]
+    sparsity_out: False
+save:
+    save_trans: False
+    # save_path: ./save

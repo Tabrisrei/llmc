@@ -55,32 +55,33 @@ class GPTQ(BaseBlockwiseQuantization):
             and self.actorder
         ) or self.owq
 
-    def hessian_sorting(self, name):
-        H = self.layers_cache[name]['H']
+    @torch.no_grad()
+    def collect_model_qparams(self):
+        for i in range(len(self.blocks)):
+            block = self.blocks[i]
+            block = block.cuda()
+            self.collect_block_qparams(block)
+            block = block.cpu()
 
-        if not self.owq:
-            if self.actorder:
-                self.perm = torch.argsort(torch.diag(H), descending=True)
-            return
+    @torch.no_grad()
+    def block_init(self, block):
+        self.named_layers = self.model.get_block_linears(block)
+        for name in self.named_layers:
+            self.layers_cache[name] = {}
+            self.layer_init(self.named_layers[name], name)
 
-        temp_mask = torch.full([self.columns], True, device=self.dev)
-        H_diag = torch.diag(H)
-        descending_ids = torch.argsort(H_diag, descending=True)
-        temp_mask[descending_ids[: self.n_out]] = False
-
-        if self.actorder:
-            perm = torch.cat(
-                [descending_ids[self.n_out:], descending_ids[:self.self.n_out]]
-            )
-        else:
-            perm = torch.cat(
-                [
-                    torch.arange(self.columns, device=self.dev)[temp_mask],
-                    descending_ids[: self.n_out],
-                ]
-            )
-
-        self.perm = perm
+    @torch.no_grad()
+    def layer_init(self, layer, name):
+        W = layer.weight.data.clone()
+        if isinstance(layer, nn.Conv2d):
+            W = W.flatten(1)
+        if isinstance(layer, transformers.Conv1D):
+            W = W.t()
+        self.layers_cache[name]['H'] = torch.zeros(
+            (W.shape[1], W.shape[1]), device=self.dev
+        )
+        self.layers_cache[name]['nsamples'] = 0
+        self.layers_cache[name]['columns'] = W.shape[1]
 
     @torch.no_grad()
     def block_transform(self, block, input_feat, block_kwargs):
@@ -124,6 +125,33 @@ class GPTQ(BaseBlockwiseQuantization):
 
         if self.actorder or self.owq:
             self.hessian_sorting(name)
+
+    def hessian_sorting(self, name):
+        H = self.layers_cache[name]['H']
+
+        if not self.owq:
+            if self.actorder:
+                self.perm = torch.argsort(torch.diag(H), descending=True)
+            return
+
+        temp_mask = torch.full([self.columns], True, device=self.dev)
+        H_diag = torch.diag(H)
+        descending_ids = torch.argsort(H_diag, descending=True)
+        temp_mask[descending_ids[: self.n_out]] = False
+
+        if self.actorder:
+            perm = torch.cat(
+                [descending_ids[self.n_out:], descending_ids[:self.self.n_out]]
+            )
+        else:
+            perm = torch.cat(
+                [
+                    torch.arange(self.columns, device=self.dev)[temp_mask],
+                    descending_ids[: self.n_out],
+                ]
+            )
+
+        self.perm = perm
 
     def process_hessian_and_weights(self, layer, name):
         W = layer.weight.data.clone()
@@ -294,18 +322,6 @@ class GPTQ(BaseBlockwiseQuantization):
                         op=dist.ReduceOp.SUM)
         self.layers_cache[name]['H'] /= world_size
 
-    @torch.no_grad()
-    def layer_init(self, layer, name):
-        W = layer.weight.data.clone()
-        if isinstance(layer, nn.Conv2d):
-            W = W.flatten(1)
-        if isinstance(layer, transformers.Conv1D):
-            W = W.t()
-        self.layers_cache[name]['H'] = torch.zeros(
-            (W.shape[1], W.shape[1]), device=self.dev
-        )
-        self.layers_cache[name]['nsamples'] = 0
-        self.layers_cache[name]['columns'] = W.shape[1]
 
     @torch.no_grad()
     def subset_init(self, subset):
@@ -314,20 +330,6 @@ class GPTQ(BaseBlockwiseQuantization):
             self.layers_cache[name] = {}
             self.layer_init(self.named_layers[name], name)
 
-    @torch.no_grad()
-    def block_init(self, block):
-        self.named_layers = self.model.get_block_linears(block)
-        for name in self.named_layers:
-            self.layers_cache[name] = {}
-            self.layer_init(self.named_layers[name], name)
-
-    @torch.no_grad()
-    def collect_model_qparams(self):
-        for i in range(len(self.blocks)):
-            block = self.blocks[i]
-            block = block.cuda()
-            self.collect_block_qparams(block)
-            block = block.cpu()
 
     @torch.no_grad()
     def split_qparams(self, qparams):

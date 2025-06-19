@@ -110,32 +110,87 @@ class BaseBlockwiseSparsification(BlockwiseOpt):
         return output
 
     def block_opt(self, block):
+
         if self.sparse_kvcache:
             if self.replace_attn:
                 self.replace_attention(block)
             self.register_kv_cache(block)
         block = block.cuda()
 
-        if not self.data_free:
-            named_linears = self.model.get_block_linears(block)
-            logger.info(f'named_linears: {named_linears}')
-            input_feat = defaultdict(list)
-            handles = []
-            self.block_init(block)
+        # if not self.data_free:
+            # named_linears = self.model.get_block_linears(block)
+            # logger.info(f'named_linears: {named_linears}')
+            # input_feat = defaultdict(list)
+            # handles = []
+            # for name in named_linears:
+            #     handles.append(
+            #         named_linears[name].register_forward_hook(
+            #             functools.partial(
+            #                 self.cache_input_hook, name=name, feat_dict=input_feat
+            #             )
+            #         )
+            #     )
 
-            for name in named_linears:
+        named_linears = self.model.get_block_linears(block)
+        extra_modules = self.model.get_extra_modules(block)
+        
+        input_feat_modules = {
+            k: v for d in [named_linears, extra_modules] for k, v in d.items()
+        }
+        logger.info(f'input_feat_modules: {input_feat_modules}')
+        # logger.info(f'named_linears: {named_linears}')
+        input_feat = defaultdict(list)
+        # handles = self.register_hooks(named_linears, input_feat)
+        handles = self.register_hooks(input_feat_modules, input_feat)
+        
+        # self.block_init(block)
+
+        # if not self.data_free:
+        self.block_init(block)
+
+        # if not self.sparsity_out:
+        #     self.input['data'] = self.block_forward(block)
+        # else:
+        #     self.block_forward(block)
+        # for h in handles:
+        #     h.remove()
+        # torch.cuda.empty_cache()
+
+        # self.block_transform(block, input_feat, self.input['kwargs'])
+
+        # if self.sparsity_out:
+        #     self.input['data'] = self.block_forward(block)
+            
+            
+        self.run(block, input_feat, handles)
+
+        block = block.cpu()
+        del input_feat
+        gc.collect()
+        torch.cuda.empty_cache()
+
+
+    def register_hooks(self, input_feat_modules, input_feat):
+        handles = []
+        if not self.data_free:
+            for name in input_feat_modules:
                 handles.append(
-                    named_linears[name].register_forward_hook(
+                    input_feat_modules[name].register_forward_hook(
                         functools.partial(
                             self.cache_input_hook, name=name, feat_dict=input_feat
                         )
                     )
                 )
+        return handles
+    
+    def run(self, block, input_feat, handles):
+        if not self.data_free:
 
             if not self.sparsity_out:
                 self.input['data'] = self.block_forward(block)
             else:
                 self.block_forward(block)
+
             for h in handles:
                 h.remove()
             torch.cuda.empty_cache()
@@ -144,34 +199,48 @@ class BaseBlockwiseSparsification(BlockwiseOpt):
 
             if self.sparsity_out:
                 self.input['data'] = self.block_forward(block)
-
-            block = block.cpu()
-            del input_feat
-            gc.collect()
-            torch.cuda.empty_cache()
-
         else:
             self.block_transform(block)
+        torch.cuda.empty_cache()
 
     def block_transform(self, block, input_feat, block_kwargs):
         logger.info(f'Start transform the {self.block_idx+1}-th block')
         subsets = self.model.get_subsets_in_block(block)
+
         for index, subset in enumerate(subsets):
             if not self.filter_subset(subset):
                 continue
-            # logger.info(f"subset: {subset}")
-            prev_op = subset['prev_op']
-            layers_dict = subset['layers']
-            input_name = subset['input'][0]
-            inspect_module = subset['inspect']
+            logger.info(f"subset: {subset}")
+            # prev_op = subset['prev_op']
+            # layers_dict = subset['layers']
+            # input_name = subset['input'][0]
+            # inspect_module = subset['inspect']
             inspect_has_kwargs = subset['has_kwargs']
-            subset_kwargs = block_kwargs if inspect_has_kwargs else {}
+            # subset_kwargs = block_kwargs if inspect_has_kwargs else {}
+            if inspect_has_kwargs:
+                if 'sub_keys' in subset:
+                    subset_kwargs = []
+                    for i in range(len(block_kwargs)):
+                        for k, v in subset['sub_keys'].items():
+                            subset_kwargs.append({k: block_kwargs[i][v]})
+                else:
+                    subset_kwargs = block_kwargs
+            else:
+                subset_kwargs = {}
+            # self.subset_transform(
+            #     layers_dict,
+            #     input_feat,
+            #     prev_op,
+            #     input_name,
+            #     inspect_module,
+            #     subset_kwargs
+            # )
             self.subset_transform(
-                layers_dict,
+                subset,
                 input_feat,
-                prev_op,
-                input_name,
-                inspect_module,
+                # prev_op,
+                # input_name,
+                # inspect_module,
                 subset_kwargs
             )
         logger.info(f'End transform the {self.block_idx+1}-th block')

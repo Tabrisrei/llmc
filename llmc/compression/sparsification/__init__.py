@@ -4,3 +4,4 @@ from .kvsparse import ShadowKVCache, SinkKVCache
 from .magnitude import Magnitude
 from .shortgpt import ShortGPT
 from .wanda import Wanda
+from .sparsegpt import SparseGPT
