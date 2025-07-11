@@ -1,4 +1,8 @@
+import copy
 import functools
+import math
+from functools import wraps
+from types import MethodType
 
 import einops as ein
 import torch
@@ -27,7 +31,7 @@ class SparseVLM(TokenReductionModule):
         special_config['token_length_list'] = []
         special_config['image_shape'] = self.model.pruning_config['image_token_length']
         special_config['image_token_index'] = self.model.pruning_config['image_token_index']
-        self.model.model.parameters = special_config
+        self.pruning_paras = special_config
 
     def register_reduction_modules(self):
         @prefill_wrapper
@@ -52,16 +56,52 @@ class SparseVLM(TokenReductionModule):
 
             return input_args
 
+        def input_hook_llava(fn, pruning_paras):
+            @wraps(fn)
+            def wrapper(self, *args, **kwargs):
+                if len(args) == 0:
+                    return fn(*args, **kwargs)
+                input_args = args[0]
+                if hasattr(input_args[0], 'shape') and input_args[0].shape[0] == 1:
+                    return fn(*args, **kwargs)
+
+                input_ids = args[0]
+                attention_mask = args[2]
+
+                if attention_mask is None:
+                    attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+                else:
+                    attention_mask = attention_mask.bool()
+
+                pre_prompt_length_list = []
+                for cur_input_ids, cur_attention_mask in zip(input_ids, attention_mask):
+                    seq = cur_input_ids[cur_attention_mask]
+                    image_token_index = (
+                        [-1]
+                        + torch.where(seq == IMAGE_TOKEN_INDEX)[0].tolist()
+                        + [seq.shape[0]]
+                    )
+                    pre_prompt_length_list.append(image_token_index[1])
+
+                pruning_paras['pre_prompt_length_list'] = pre_prompt_length_list
+
+                outputs = fn(*args, **kwargs)
+
+                pruning_paras['token_length_list'] = outputs[2].sum(dim=1).tolist()
+
+                return outputs
+            return wrapper
+
         @prefill_wrapper_model
         def register_module_pars(module, args, kwargs, pruning_pars):
             pre_prompt_length_list = pruning_pars['pre_prompt_length_list']
             inputs_embeds = kwargs['inputs_embeds']
             if inputs_embeds is None:
-                inputs_embeds = self.embed_tokens(kwargs['input_ids'])
+                inputs_embeds = module.embed_tokens(kwargs['input_ids'])
             hidden_states = inputs_embeds  # shape: (B, L, C)
 
-            pruning_pars['B'], L, _ = hidden_states.shape
-            B = pruning_pars['B']
+            B, L, _ = hidden_states.shape
+            pruning_pars['B'] = B
             init_n = pruning_pars['init_token_total_shape'] + \
                 pruning_pars['generate_process_count']    # 668
             pruning_pars['prev_decision'] = torch.ones(
@@ -80,7 +120,7 @@ class SparseVLM(TokenReductionModule):
             if (len(pre_prompt_length_list) != 0 and hidden_states.shape[1] != 1):
                 v_t = hidden_states[:, v_token_start: text_token_start, :]
                 t_t = hidden_states[:, text_token_start:, :]
-                m_v_t = v_t @ t_t.transpose(1, 2)  # [1, 576, 53]
+                m_v_t = v_t @ t_t.transpose(1, 2)  # [1, 576, 53]  # 52?
                 m_v_t = m_v_t.softmax(2).mean(1)  # [1, 53]
                 pruning_pars['t_token_idx'] = torch.where(m_v_t > m_v_t.mean())
 
@@ -94,14 +134,90 @@ class SparseVLM(TokenReductionModule):
                 kwargs['position_embeddings'] = pruning_pars['position_embeddings']
             return args, kwargs
 
+        def get_attn_logits_hook(module, args, kwargs, pruning_pars, layer_idx):
+
+            if len(kwargs['position_ids'][0]) == 1:
+                return args, kwargs
+
+            from transformers.models.llama.modeling_llama import \
+                apply_rotary_pos_emb
+
+            if layer_idx != self.pruning_loc[0]:
+                kwargs['position_ids'] = pruning_pars['position_ids']
+                kwargs['cache_position'] = pruning_pars['cache_position']
+                kwargs['position_embeddings'] = pruning_pars['position_embeddings']
+
+            hidden_states = kwargs['hidden_states']
+            position_embeddings = kwargs['position_embeddings']
+            position_ids = kwargs['position_ids']
+            past_key_value = kwargs['past_key_value']
+            cache_position = kwargs['cache_position']
+            attention_mask = kwargs['attention_mask']
+
+            t_token_idx = pruning_pars['t_token_idx']
+            v_token_start = pruning_pars['v_token_start']
+            v_token_num = pruning_pars['v_token_num']
+
+            bsz, q_len, _ = hidden_states.size()
+            query_states = module.q_proj(hidden_states)
+            key_states = module.k_proj(hidden_states)
+            value_states = module.v_proj(hidden_states)
+            query_states = query_states.view(
+                bsz, q_len, module.num_heads, module.head_dim
+            ).transpose(1, 2)
+            key_states = key_states.view(
+                bsz, q_len, module.num_key_value_heads, module.head_dim
+            ).transpose(1, 2)
+            value_states = value_states.view(
+                bsz, q_len, module.num_key_value_heads, module.head_dim
+            ).transpose(1, 2)
+
+            if position_embeddings is None:
+                cos, sin = module.rotary_emb(value_states, position_ids)
+            else:
+                cos, sin = position_embeddings
+
+            query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+            if past_key_value is not None:
+                temp_cache = copy.deepcopy(past_key_value)
+                cache_kwargs = {'sin': sin, 'cos': cos, 'cache_position': cache_position}
+                key_states, value_states = temp_cache.update(
+                    key_states, value_states,
+                    layer_idx, cache_kwargs
+                )
+            t_token_idx = t_token_idx[1] + v_token_start + v_token_num
+            L, S = query_states.size(-2), key_states.size(-2)
+            scale_factor = 1 / math.sqrt(query_states.size(-1))
+            attn_bias = torch.zeros(L, S, dtype=query_states.dtype)
+            if module.is_causal:
+                assert attention_mask is None
+                temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
+                attn_bias.masked_fill_(temp_mask.logical_not(), float('-inf'))
+                attn_bias.to(query_states.dtype)
+
+            attn_logits = query_states @ key_states.transpose(2, 3) * scale_factor
+            attn_logits += attn_bias.to(query_states.device)
+            attn_logits = torch.softmax(attn_logits, dim=-1)
+
+            pruning_pars['attn_logits'] = attn_logits
+
+            return args, kwargs
+
         @prefill_wrapper
         def decoder_attn_hook(module, inputs, kwargs, layer_outputs, pruning_pars, layer_idx):
 
-            attn_logits = layer_outputs[1]
+            # pruning_pars['attn_logits'] 对llavaHf运行存在BUG,
+            # 使用layer_outputs[1]运行llavaHf无问题，但精度没对上
+            # llava：attn_logits = pruning_pars['attn_logits']
+            # llavahf：attn_logits = layer_outputs[1]
+            if 'attn_logits' not in pruning_pars:
+                attn_logits = layer_outputs[1]
+            else:
+                attn_logits = pruning_pars['attn_logits']
             v_token_start = pruning_pars['v_token_start']
+            v_token_num = pruning_pars['v_token_num']
             text_token_start = pruning_pars['text_token_start']
             t_token_idx = pruning_pars['t_token_idx']
-            v_token_num = pruning_pars['v_token_num']
             retained_tokens = pruning_pars['retained_tokens']
             B = pruning_pars['B']
             pre_prompt_length_list = pruning_pars['pre_prompt_length_list']
@@ -111,10 +227,7 @@ class SparseVLM(TokenReductionModule):
                 pruning_pars['position_ids'] = position_ids
             else:
                 position_ids = pruning_pars['position_ids']
-
             hidden_states = inputs[0]  # [B, L, D]
-            pre_prompt_length_list = pruning_pars['pre_prompt_length_list']
-            image_shape = pruning_pars['image_shape']
 
             pred_score_vis, s_flag, relation_vis_text = attn_postprocess_topk(
                 attn_logits,
@@ -143,7 +256,6 @@ class SparseVLM(TokenReductionModule):
 
             # merge and cluster
             if s_flag and total_sparse_token_idx.shape[1] > 0:
-                total_sparse_token_idx = torch.where(policy == 0)[1].unsqueeze(0)
                 total_sparse_token = batch_index_select(layer_outputs[0], total_sparse_token_idx)
 
                 merge_token_idx_stage1 = torch.where(pred_score_vis == 0)[1]
@@ -174,7 +286,6 @@ class SparseVLM(TokenReductionModule):
                 )
                 layer_outputs = (select_and_merge_token, layer_outputs[1])
                 position_ids = position_ids[:, :len(select_token_idx[0]) + cluster_num]
-                # prev_decision = policy
                 v_token_num = pred_score_vis.sum() + cluster_num
                 text_token_start = v_token_start + v_token_num
             else:
@@ -182,12 +293,10 @@ class SparseVLM(TokenReductionModule):
                 layer_outputs = (batch_index_select(layer_outputs[0], select_token_idx),
                                  layer_outputs[1])
                 position_ids = position_ids[:, :len(select_token_idx[0])]
-                # prev_decision = policy
                 v_token_num = pred_score_vis.sum()
                 text_token_start = v_token_start + v_token_num
 
             new_output = layer_outputs
-            # hidden_states = layer_outputs[0]
             cache_position = position_ids.detach().clone()
 
             pruning_pars['v_token_num'] = v_token_num
@@ -206,17 +315,31 @@ class SparseVLM(TokenReductionModule):
 
             return args, kwargs
 
-        self.model.embed_tokens.register_forward_pre_hook(
-            functools.partial(
-                input_hook,
-                pruning_pars=self.model.model.parameters
+        if self.model.__class__.__name__ == 'LlavaHf':
+            self.model.embed_tokens.register_forward_pre_hook(
+                functools.partial(
+                    input_hook,
+                    pruning_pars=self.pruning_paras
+                )
             )
-        )
+        elif self.model.__class__.__name__ == 'Llava':
+            from llava.constants import IMAGE_TOKEN_INDEX
+            hook_fn = input_hook_llava(
+                self.model.vlm_model.prepare_inputs_labels_for_multimodal,
+                self.pruning_paras
+            )
+            self.model.vlm_model.prepare_inputs_labels_for_multimodal = MethodType(
+                hook_fn, self.model.vlm_model
+            )
 
-        self.model.model.register_forward_pre_hook(
+        if self.model.__class__.__name__ == 'LlavaHf':
+            llama_model = self.model.model
+        elif self.model.__class__.__name__ == 'Llava':
+            llama_model = self.model.model.model
+        llama_model.register_forward_pre_hook(
             functools.partial(
                 register_module_pars,
-                pruning_pars=self.model.model.parameters),
+                pruning_pars=self.pruning_paras),
             with_kwargs=True
         )
 
@@ -225,18 +348,28 @@ class SparseVLM(TokenReductionModule):
 
         for block_idx in range(sorted_pruning_locs[0], total_layers):
             if block_idx in sorted_pruning_locs:
-                self.blocks[block_idx].register_forward_pre_hook(
-                    functools.partial(
-                        update_output_attentions_hook,
-                        pruning_pars=self.model.model.parameters,
-                        layer_idx=block_idx,
-                    ),
-                    with_kwargs=True
-                )
+                if self.model.__class__.__name__ == 'LlavaHf':
+                    self.blocks[block_idx].register_forward_pre_hook(
+                        functools.partial(
+                            update_output_attentions_hook,
+                            pruning_pars=self.pruning_paras,
+                            layer_idx=block_idx,
+                        ),
+                        with_kwargs=True
+                    )
+                elif self.model.__class__.__name__ == 'Llava':
+                    self.blocks[block_idx].self_attn.register_forward_pre_hook(
+                        functools.partial(
+                            get_attn_logits_hook,
+                            pruning_pars=self.pruning_paras,
+                            layer_idx=block_idx,
+                        ),
+                        with_kwargs=True
+                    )
                 self.blocks[block_idx].register_forward_hook(
                     functools.partial(
                         decoder_attn_hook,
-                        pruning_pars=self.model.model.parameters,
+                        pruning_pars=self.pruning_paras,
                         layer_idx=block_idx,
                     ),
                     with_kwargs=True
@@ -245,7 +378,7 @@ class SparseVLM(TokenReductionModule):
                 self.blocks[block_idx].register_forward_pre_hook(
                     functools.partial(
                         read_parameter_hook,
-                        pruning_pars=self.model.model.parameters
+                        pruning_pars=self.pruning_paras
                     ),
                     with_kwargs=True
                 )
@@ -278,6 +411,7 @@ def attn_postprocess_topk(
     self_attn_weights = self_attn_weights.mean(1)  # B, L[Q], L[K]
 
     t_token_idx = t_token_idx[1] + text_token_start
+
     relation_vis_text = self_attn_weights[:, t_token_idx,
                                           v_token_start: v_token_start + v_token_num]  # B, L2, L1
 
