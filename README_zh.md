@@ -1,21 +1,23 @@
 <div align="center" style="font-family: charter;">
-<h1> LLMC：迈向准确且高效的大语言模型压缩 </h1>
+<h1> LightCompress：迈向准确且高效的AIGC大模型压缩 </h1>
 
 <img src="./imgs/llmc.png" alt="llmc" width="75%" />
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ModelTC/llmc)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ModelTC/LightCompress)
 [![arXiv](https://img.shields.io/badge/LLMC-2405.06001-b31b1b)](https://arxiv.org/abs/2405.06001)
 [![Discord Banner](https://img.shields.io/discord/1139835312592392214?logo=discord&logoColor=white)](https://discord.com/invite/NfJzbkK3jY)
 [![QQ](https://img.shields.io/badge/QQ-EB1923?logo=tencent-qq&logoColor=white)](http://qm.qq.com/cgi-bin/qm/qr?_wv=1027&k=I9IGPWWj8uuRXWH3_ELWjouf6gkIMgUl&authKey=GA3WbFAsm90ePJf%2FCbc7ZyXXq4ShQktlBaLxgqS5yuSPAsr3%2BDKMRdosUiLYoilO&noverify=0&group_code=526192592)
 [![Doc](https://img.shields.io/badge/docs-English-99cc2)](https://llmc-en.readthedocs.io/en/latest/)
 [![Doc](https://img.shields.io/badge/文档-中文-99cc2)](https://llmc-zhcn.readthedocs.io/en/latest/)&#160;
 
-**\[ [English](README.md) | 中文 | [日本語](README_ja.md) \]**
+**\[ [English](README.md) | 中文 \]**
 
 </div>
 
-**LLMC** 是一个开箱即用的工具，专为压缩LLM设计，利用最先进的压缩算法提高效率并减少模型体积，同时不影响预测精度。你可以通过以下命令下载可以运行llmc的docker镜像，中国大陆用户推荐使用阿里云docker。
+> **📢 提示**: 本仓库原名为 **LLMC**，现已更名为 **LightCompress**。
+
+**LightCompress** 是一个开箱即用的工具，专为压缩AIGC大模型(LLM, VLM, Diffusion ...)设计，利用最先进的压缩算法提高效率并减少模型体积，同时不影响预测精度。你可以通过以下命令下载可以运行LightCompress的docker镜像，中国大陆用户推荐使用阿里云docker。
 
 ```shell
 # Docker Hub: https://hub.docker.com/r/llmcompression/llmc
