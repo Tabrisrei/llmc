@@ -1,3 +1,4 @@
+import os
 import types
 from datetime import timedelta
 from typing import Optional, Union
@@ -9,6 +10,7 @@ from lmms_eval.api.model import lmms
 from lmms_eval.models.llava import Llava as LLaVA
 from loguru import logger
 from packaging import version
+from PIL import Image
 from transformers import AutoConfig, AutoTokenizer
 
 from llmc.utils.registry_factory import MODEL_REGISTRY
@@ -17,8 +19,11 @@ from .llama import Llama
 
 try:
     from llava.constants import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
-                                 DEFAULT_IMAGE_PATCH_TOKEN, IMAGE_TOKEN_INDEX)
-    from llava.mm_utils import get_model_name_from_path
+                                 DEFAULT_IMAGE_PATCH_TOKEN,
+                                 DEFAULT_IMAGE_TOKEN, IMAGE_TOKEN_INDEX)
+    from llava.conversation import SeparatorStyle, conv_templates
+    from llava.mm_utils import (get_model_name_from_path, process_images,
+                                tokenizer_image_token)
     from llava.model.builder import load_pretrained_model
     from llava.model.language_model.llava_llama import LlavaConfig
 except Exception as e:
@@ -34,21 +39,16 @@ class Llava(Llama):
         pass
 
     def build_model(self):
-        self.llava_config = LlavaConfig.from_pretrained(
-            self.model_path, trust_remote_code=True
-        )
+
         self.vlm_model_config = AutoConfig.from_pretrained(
             self.model_path, trust_remote_code=True
         )
-        # llava need: use_cache
-        self.llava_config.use_cache = True
-        self.vlm_model_config.use_cache = True
         logger.info(f'self.vlm_model_config : {self.vlm_model_config}')
-
-        self.tokenizer, self.vlm_model, image_processor, context_len = load_pretrained_model(
+        model_name = get_model_name_from_path(self.model_path)
+        self.tokenizer, self.vlm_model, self.image_processor, context_len = load_pretrained_model(
             self.model_path,
             None,
-            get_model_name_from_path(self.model_path),
+            model_name,
             device_map='cpu',
             attn_implementation='sdpa'
         )
@@ -57,6 +57,7 @@ class Llava(Llama):
         self.mm_model = self.vlm_model
         logger.info(f'self.vlm_model : {self.vlm_model}')
         self.vision_model = self.vlm_model.get_vision_tower()
+        self.language_model = self.vlm_model.model
         self.vision_projector = self.vlm_model.model.mm_projector
         # Llava merges the language model with the vision projector and vision model
         self.model = self.vlm_model
@@ -64,12 +65,16 @@ class Llava(Llama):
         self.pruning_config = {
             'is_video_model': False,
             'image_token_length': self.vlm_model_config.image_seq_length,
-            'select_layer': self.vlm_model_config.vision_feature_layer,
-            'select_feature': self.vlm_model_config.vision_feature_select_strategy,
-            'image_token_index': self.vlm_model_config.image_token_index,
+            'select_layer': self.vision_model.select_layer,
+            'select_feature': self.vision_model.select_feature,
+            'image_token_index': IMAGE_TOKEN_INDEX,
             'IMAGE_TOKEN_INDEX': IMAGE_TOKEN_INDEX,  # for llava
+            'vision_token_start_index': 35,
         }
+        if 'v1.6' in model_name.lower():
+            self.pruning_config['image_token_length'] = None
         self.processor = None
+        self.first_turn_question = True
 
     def get_extra_rot_module_besides_embed_layers(self):
         return [self.vision_projector[2]]
@@ -136,6 +141,94 @@ class Llava(Llama):
             ]
         else:
             raise Exception(f'Llava do not support {self.get_modality()} modality.')
+
+    def eval_custom_samples_just_infer(
+        self,
+        img_qas,
+        eval_cfg
+    ):  # noqa
+
+        custom_samples_ans = img_qas.copy()
+
+        self.vlm_model.cuda()
+
+        def load_image(image_file):
+            image = Image.open(image_file).convert('RGB')
+            return image
+
+        def load_images(image_files):
+            out = []
+            for image_file in image_files:
+                image = load_image(image_file)
+                out.append(image)
+            return out
+
+        for data_idx, questions in enumerate(img_qas):
+            self.first_turn_question = True
+
+            custom_samples_ans[data_idx]['answer'] = []
+
+            image_files = questions['image']
+            image_files = [os.path.join(eval_cfg.path, 'images', image_file) for image_file in image_files] # noqa
+            images = load_images(image_files)
+            image_sizes = [x.size for x in images]
+            images_tensor = process_images(
+                images,
+                self.image_processor,
+                self.vlm_model.config
+            ).to(self.vlm_model.device, dtype=torch.float16)
+
+            input_ids_old = None
+
+            for question_idx, question in enumerate(questions['question']):
+
+                conv_mode = 'llava_v1'
+                conv = conv_templates[conv_mode].copy()
+                if question_idx > 0:
+                    conv.system = ''
+                    qs = question
+                    self.first_turn_question = False
+                else:
+                    qs = DEFAULT_IMAGE_TOKEN + '\n' + question
+                conv.append_message(conv.roles[0], qs)
+                conv.append_message(conv.roles[1], None)
+                prompt = conv.get_prompt()
+
+                input_ids = tokenizer_image_token(prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt').unsqueeze(0).cuda() # noqa
+                # print(f"input_ids 1: {input_ids}, {input_ids.shape}")
+                if input_ids_old is not None:
+                    input_ids = torch.cat((input_ids_old, input_ids), dim=1)
+                # print(f"input_ids 2: {input_ids}, {input_ids.shape}")
+
+                with torch.inference_mode():
+                    output_ids = self.vlm_model.generate(
+                        input_ids,
+                        attention_mask=input_ids.new_ones(input_ids.shape, dtype=torch.bool),
+                        images=images_tensor,
+                        image_sizes=image_sizes,
+                        do_sample=False,
+                        top_p=None,
+                        num_beams=1,
+                        max_new_tokens=eval_cfg.max_new_tokens,
+                        use_cache=True,
+                    )
+
+                    # print(f"output_ids: {output_ids}, {output_ids.shape}")
+
+                outputs = self.tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+
+                print('--------------------------------')
+                print(f'data_idx: {data_idx}')
+                print(f'question_idx: {question_idx}')
+                print(f'question: {question}')
+                print(f'outputs: {outputs}')
+                print('--------------------------------')
+
+                custom_samples_ans[data_idx]['answer'].append(outputs[0])
+
+                input_ids_old = torch.cat((input_ids, output_ids), dim=1)
+
+        return custom_samples_ans
 
 
 if version.parse(torch.__version__) >= version.parse('2.1.2'):

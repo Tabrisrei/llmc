@@ -9,6 +9,9 @@ from .holitom import HoliTom
 from .mustdrop import MustDrop
 from .prunevid import PruneVid
 from .pyramiddrop import PyramidDrop
+from .random import RandomPrune
 from .sparsevlm import SparseVLM
 from .tome import ToMe
 from .visionzip import VisionZip
+from .vispruner import VisPruner
+from .visualizer import Visualizer

@@ -4,7 +4,6 @@ import json
 import os
 from abc import ABCMeta, abstractmethod
 from collections import defaultdict
-from functools import partial
 
 import torch
 import torch.nn as nn
@@ -16,7 +15,8 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from llmc.compression.quantization.module_utils import (
     _LLMC_LINEAR_TYPES_, _LLMC_LN_TYPES_, _TRANSFORMERS_LINEAR_TYPES_,
-    _TRANSFORMERS_LN_TYPES_, LlmcFp8Linear)
+    _TRANSFORMERS_LN_TYPES_, LlmcFp8Linear, VllmQuantLinearFp8,
+    VllmQuantLinearInt8)
 
 
 class BaseModel(metaclass=ABCMeta):
@@ -27,7 +27,10 @@ class BaseModel(metaclass=ABCMeta):
         self.tokenizer_mode = self.config.model.get('tokenizer_mode', 'fast')
         self.use_cpu_to_save_cuda_mem_for_catcher = self.config.model.get('use_cpu_to_save_cuda_mem_for_catcher', False) # noqa
         torch_dtype = self.config.model.torch_dtype
-        self.torch_dtype = torch_dtype if torch_dtype == 'auto' else eval(torch_dtype)
+        self.torch_dtype = torch_dtype if torch_dtype in ['auto'] else eval(torch_dtype)
+        self.block_wise_quant = self.config.model.get('block_wise_quant', False)
+        if self.block_wise_quant:
+            assert self.torch_dtype == torch.float8_e4m3fn
         self.device_map = device_map
         self.use_cache = use_cache
         self.mm_model = None
@@ -199,20 +202,32 @@ class BaseModel(metaclass=ABCMeta):
             if hasattr(self.model_config, 'use_cache'):
                 self.model_config.use_cache = False
         logger.info(f'self.model_config : {self.model_config}')
-        if self.torch_dtype == torch.float8_e4m3fn:
+        if self.torch_dtype in [torch.float8_e4m3fn, torch.int8]:
             with init_empty_weights():
                 self.model = AutoModelForCausalLM.from_config(config=self.model_config,
                                                               torch_dtype=torch.float16,
                                                               trust_remote_code=True)
             self.find_blocks()
-            self.fp8_block_size \
-                = self.model_config.quantization_config['weight_block_size'][0]
+            if self.torch_dtype == torch.float8_e4m3fn:
+                if self.block_wise_quant:
+                    self.fp8_block_size \
+                        = self.model_config.quantization_config['weight_block_size'][0]
+                    params_dict = {'block_size': self.fp8_block_size}
+                    quant_linear_cls = LlmcFp8Linear
+                else:
+                    params_dict = {}
+                    quant_linear_cls = VllmQuantLinearFp8
+            elif self.torch_dtype == torch.int8:
+                params_dict = {}
+                quant_linear_cls = VllmQuantLinearInt8
+
             for block_idx, block in enumerate(self.blocks):
-                self.replace_module_block(LlmcFp8Linear,
+                self.replace_module_block(quant_linear_cls,
                                           block,
                                           block_idx,
-                                          {'block_size': self.fp8_block_size})
-            self.load_fp8_weight()
+                                          params_dict)
+
+            self.load_quant_weight()
 
             logger.info(f'fp8 block size: {self.fp8_block_size}')
         else:
@@ -226,7 +241,7 @@ class BaseModel(metaclass=ABCMeta):
             )
         logger.info(f'self.model : {self.model}')
 
-    def load_fp8_weight(self):
+    def load_quant_weight(self):
         state_dict = self.model.state_dict()
         model_index_file = os.path.join(self.model_path, 'model.safetensors.index.json')
 
@@ -241,7 +256,7 @@ class BaseModel(metaclass=ABCMeta):
 
         for shard_path, tensor_names in shard_to_tensors.items():
             full_shard_path = os.path.join(self.model_path, shard_path)
-            logger.info(f'Loading FP8 shard: {full_shard_path}')
+            logger.info(f'Loading Quant shard: {full_shard_path}')
             with safe_open(full_shard_path, framework='pt', device='cpu') as f:
                 for weight_name in tensor_names:
                     tensor = f.get_tensor(weight_name)

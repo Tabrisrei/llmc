@@ -15,9 +15,8 @@ eval:
 sparse:
     method: TokenReduction
     special:
-        method: FastV
-        pruning_loc: 3
-        rate: 0.778  # prune_rate
+        method: DivPrune
+        reduction_ratio: 0.9444 # 0.7778 0.8889 0.9444
 save:
     save_trans: False
     save_fake: False

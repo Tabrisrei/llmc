@@ -5,7 +5,8 @@ model:
     path: model path
     torch_dtype: auto
 eval:
-    eval_pos: [transformed]
+
+    eval_pos: [pretrain, transformed]
     type: vqa
     name: [mme]
     download: False
@@ -16,11 +17,9 @@ sparse:
     vision:
         method: TokenReduction
         special:
-            method: VisionZip   # retain
-            dominant: 162       # visual_tokens = dominan_tokens + contextual
-            contextual: 30      # llava: 162+30,108+20,54+10 llava_next: 108+20,54+10,27+5
-            prune_only: False
-            merge_only: False
+            method: VisPruner
+            prune_ratio: 0.778  # 0.667 0.778 0.889
+            important_ratio: 0.5
 save:
     save_trans: False
     save_fake: False

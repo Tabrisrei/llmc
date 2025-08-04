@@ -5,6 +5,7 @@ model:
     path: Deepseekv3-fp8-path
     tokenizer_mode: fast
     torch_dtype: torch.float8_e4m3fn
+    block_wise_quant: True
 quant:
     method: RTN
     weight:

@@ -5,19 +5,23 @@ model:
     path: model path
     torch_dtype: auto
 eval:
-    eval_pos: [pretrain, transformed]
-    type: vqa
-    name: [mme]
+    eval_pos: [transformed] # transformed
+    name: custom_gen
+    type: just_infer
     download: False
-    path: MME dataset path
+    path: /data/nvme1/yongyang/projects/llmc_plus/general_custom_data
+    apply_chat_template: True
     bs: 1
     inference_per_block: False
+    max_new_tokens: 512
+    statistics: False
 sparse:
     method: TokenReduction
     special:
         method: SparseVLM
         pruning_loc: [2, 6, 15]
-        reduction_ratio: 0.6667
+        retained_tokens: 192
+        prune_flag: True
         merge_flag: True
 save:
     save_trans: False

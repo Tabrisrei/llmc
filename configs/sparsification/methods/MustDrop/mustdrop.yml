@@ -5,22 +5,20 @@ model:
     path: model path
     torch_dtype: auto
 eval:
-    eval_pos: [transformed]
+    eval_pos: [pretrain, transformed]
     type: vqa
     name: [mme]
     download: False
     path: MME dataset path
     bs: 1
-    inference_per_block: False
 sparse:
     vision:
         method: TokenReduction
         special:
-            method: VisionZip   # retain
-            dominant: 162       # visual_tokens = dominan_tokens + contextual
-            contextual: 30      # llava: 162+30,108+20,54+10 llava_next: 108+20,54+10,27+5
-            prune_only: False
-            merge_only: False
+            method: MustDrop
+            spatial_threshold: 0.6
+            window_size: [3, 3]
+            retained_tokens: 128  # llava_next: 128, 64, 32 llava: 192, 128, 64
 save:
     save_trans: False
     save_fake: False
