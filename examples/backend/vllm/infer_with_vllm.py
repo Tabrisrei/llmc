@@ -7,11 +7,11 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 
 if __name__ == '__main__':
     # model_path = '/path/to/save_for_vllm_awq_w4/real_quant_model'
-    # model_path= '/home/gsb/LLMCMed/atrans_models/meta-llama_vllm/awq_w_only_4b_Meta-Llama-3-8B/vllm_quant_model'
-    # model_path= '/home/gsb/LLMCMed/atrans_models/meta-llama_vllm/awq_w_only_4b_Meta-Llama-3-8B/vllm_quant_model'
-    model_path='/home/gsb/LLMCMed/atrans_models/meta-llama_vllm/smqu_w_only_8b_Meta-Llama-3-8B/vllm_quant_model'
-    # model_path='/home/gsb/LLMCMed/atrans_models/meta-llama_vllm/gptq_w_only_4b_Meta-Llama-3-8B/vllm_quant_model'
-    # model_path='/home/gsb/LLMCMed/atrans_models/meta-llama_vllm/gptq_w_only_8b_Meta-Llama-3-8B/vllm_quant_model'
+    model_path= '/home/gsb/LLMCMed/atrans_models/meta-llama/awq_w_only_4b_Meta-Llama-3-8B/vllm_quant_model'
+    # model_path= '/home/gsb/LLMCMed/atrans_models/meta-llama/awq_w_only_8b_Meta-Llama-3-8B/vllm_quant_model'
+    # model_path='/home/gsb/LLMCMed/atrans_models/meta-llama/smqu_w_only_8b_Meta-Llama-3-8B/vllm_quant_model'
+    # model_path='/home/gsb/LLMCMed/atrans_models/meta-llama/gptq_w_only_4b_Meta-Llama-3-8B/vllm_quant_model'
+    # model_path='/home/gsb/LLMCMed/atrans_models/meta-llama/gptq_w_only_8b_Meta-Llama-3-8B/vllm_quant_model'
     model = LLM(model_path)
     tokenizer = AutoTokenizer.from_pretrained(model_path)
 

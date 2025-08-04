@@ -21,14 +21,25 @@ eval:
     bs: 1
     seq_len: 2048
 sparse:
-    method: Wanda
+    method: SparseGPT
     weight:
         sparsity: 0.5
+        # granularity: per_group
+        # group_size: 128
     special:
-        pattern: unstructured # unstructured, semi_structured, structured
-        granularity: channel # channel, group, token, block
+        # actorder: False
+        # static_groups: False
+        unstructured: True
+        semi_structured: False
         prunen: 0
         prunem: 0
+        structured: False
+        percdamp: 0.01
+        blocksize: 128
+        true_sequential: True
+        # owq: True
+        #target bit is 4.01
+        # n_outs: [6, 6, 6, 6, 2, 2, 6]
     sparsity_out: False
 save:
     save_trans: False

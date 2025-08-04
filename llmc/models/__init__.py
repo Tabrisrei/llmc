@@ -1,6 +1,7 @@
 from .bloom import Bloom
 from .chatglm import ChatGLM
 from .deepseekv2 import DeepseekV2
+from .deepseekv2lite import DeepseekV2Lite
 from .deepseekv3 import DeepseekV3
 from .falcon import Falcon
 from .gemma2 import Gemma2

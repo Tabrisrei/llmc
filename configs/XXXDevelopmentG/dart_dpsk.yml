@@ -1,0 +1,71 @@
+base:
+    seed: &seed 42
+model:
+    type: DeepseekV2Lite
+    # path: Deepseekv2-fp8-path
+    path: /home/gsb/base_models/deepseek-ai/DeepSeek-V2-Lite
+    tokenizer_mode: fast
+    # torch_dtype: torch.float8_e4m3fn
+    torch_dtype: auto
+# calib:
+#     name: pileval
+#     download: False
+#     path: calib data path
+#     n_samples: 128
+#     bs: -1
+#     seq_len: 512
+#     preproc: pileval_awq
+#     seed: *seed
+# calib:
+#     name: pileval
+#     download: True
+#     path: /home/gsb/LLMCMed/adatasets/processed/pileval
+#     n_samples: 128
+#     # n_samples: 16
+#     bs: -1
+#     seq_len: 512
+#     # seq_len: 256
+#     # preproc: txt_general_preproc
+#     preproc: pileval_awq
+#     seed: *seed
+eval:
+    eval_pos: [pretrain, transformed]
+    type: vqa
+    name: [mme]
+    # download: False
+    download: True
+    # path: MME dataset path
+    path: /home/gsb/datasets/temp/lmms-lab/MME
+    bs: 1
+    inference_per_block: False
+    
+# quant:
+sparse:
+    method: TokenReduction
+    special:
+        method: DART
+        pruning_loc: 2
+        reduction_ratio: 0.778
+        max_num_trunction: 128
+        pivot_image_token: 4
+        pivot_text_token : 4
+
+    # method: Awq
+    # weight:
+    #     bit: 4
+    #     symmetric: False
+    #     granularity: per_group
+    #     group_size: 64
+    #     pack_version: gemm_pack
+    #     need_pack: True
+    # special:
+    #     trans: True
+    #     trans_version: v2
+    #     weight_clip: True
+    #     save_mem: False
+    # modality: language
+save:
+    save_fake: True
+    # save_autoawq: True
+    # save_path: /path/to/save/
+    save_path: /home/gsb/LLMCMed/atrans_models/deepseek-ai/dart_dpsk
